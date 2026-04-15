@@ -445,6 +445,46 @@ async def list_products(request: Request, search: Optional[str] = None, category
     set_cached(cache_key, response)
     return response
 
+@api.get("/products/template-csv")
+async def product_csv_template():
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["name", "sku", "barcode", "category", "unit_price", "cost_price", "description"])
+    writer.writerow(["Cotton Shirt", "CS-001", "BC100001", "Shirts", "2500.00", "1200.00", "Premium cotton shirt"])
+    return Response(content=output.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=products_template.csv"})
+
+@api.post("/products/bulk-import")
+async def bulk_import_products(request: Request, file: UploadFile = File(...)):
+    await get_current_user(request)
+    contents = await file.read()
+    reader = csv.DictReader(io.StringIO(contents.decode("utf-8")))
+    results = {"created": 0, "skipped": 0, "errors": []}
+    for i, row in enumerate(reader):
+        try:
+            if not row.get("name") or not row.get("sku"):
+                results["errors"].append(f"Row {i+2}: name and sku required")
+                continue
+            existing = supabase.table("products").select("id").eq("sku", row["sku"]).execute()
+            if existing.data:
+                results["skipped"] += 1
+                results["errors"].append(f"Row {i+2}: SKU '{row['sku']}' already exists")
+                continue
+            data = {
+                "name": row["name"], "sku": row["sku"],
+                "barcode": row.get("barcode") or f"BC{str(uuid.uuid4().int)[:12]}",
+                "category": row.get("category", ""),
+                "unit_price": float(row.get("unit_price", 0)),
+                "cost_price": float(row.get("cost_price", 0)),
+                "description": row.get("description", ""),
+                "is_active": True
+            }
+            supabase.table("products").insert(data).execute()
+            results["created"] += 1
+        except Exception as e:
+            results["errors"].append(f"Row {i+2}: {str(e)[:80]}")
+    invalidate_cache("products")
+    return results
+
 @api.get("/products/barcode/{barcode}")
 async def get_product_by_barcode(barcode: str, request: Request):
     await get_current_user(request)
@@ -533,6 +573,51 @@ async def list_stock_transfers(request: Request):
     await get_current_user(request)
     result = supabase.table("stock_transfers").select("*, from_location:locations!stock_transfers_from_location_id_fkey(name), to_location:locations!stock_transfers_to_location_id_fkey(name)").order("created_at", desc=True).execute()
     return result.data
+
+@api.get("/inventory/template-csv")
+async def inventory_csv_template(request: Request):
+    await get_current_user(request)
+    products = supabase.table("products").select("sku, name").eq("is_active", True).limit(5).execute()
+    locations = supabase.table("locations").select("name").eq("is_active", True).limit(5).execute()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["product_sku", "location_name", "quantity", "min_stock_level"])
+    if products.data and locations.data:
+        writer.writerow([products.data[0]["sku"], locations.data[0]["name"], "100", "10"])
+    else:
+        writer.writerow(["CS-001", "Main Outlet", "100", "10"])
+    return Response(content=output.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=inventory_template.csv"})
+
+@api.post("/inventory/bulk-import")
+async def bulk_import_inventory(request: Request, file: UploadFile = File(...)):
+    await get_current_user(request)
+    contents = await file.read()
+    reader = csv.DictReader(io.StringIO(contents.decode("utf-8")))
+    results = {"updated": 0, "created": 0, "errors": []}
+    for i, row in enumerate(reader):
+        try:
+            product = supabase.table("products").select("id").eq("sku", row.get("product_sku", "")).execute()
+            if not product.data:
+                results["errors"].append(f"Row {i+2}: Product SKU '{row.get('product_sku')}' not found")
+                continue
+            location = supabase.table("locations").select("id").eq("name", row.get("location_name", "")).execute()
+            if not location.data:
+                results["errors"].append(f"Row {i+2}: Location '{row.get('location_name')}' not found")
+                continue
+            pid, lid = product.data[0]["id"], location.data[0]["id"]
+            qty = float(row.get("quantity", 0))
+            min_stock = float(row.get("min_stock_level", 0))
+            existing = supabase.table("inventory").select("id").eq("product_id", pid).eq("location_id", lid).execute()
+            if existing.data:
+                supabase.table("inventory").update({"quantity": qty, "min_stock_level": min_stock, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", existing.data[0]["id"]).execute()
+                results["updated"] += 1
+            else:
+                supabase.table("inventory").insert({"product_id": pid, "location_id": lid, "quantity": qty, "min_stock_level": min_stock}).execute()
+                results["created"] += 1
+        except Exception as e:
+            results["errors"].append(f"Row {i+2}: {str(e)[:80]}")
+    invalidate_cache("inventory")
+    return results
 
 # ===================== BOM ROUTES =====================
 
@@ -1067,93 +1152,6 @@ async def upload_logo(request: Request, file: UploadFile = File(...)):
         supabase.table("app_settings").insert({"key": "logo_url", "value": data_url}).execute()
     invalidate_cache("settings")
     return {"logo_url": data_url}
-
-# ===================== BULK IMPORT =====================
-
-@api.get("/products/template-csv")
-async def product_csv_template():
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["name", "sku", "barcode", "category", "unit_price", "cost_price", "description"])
-    writer.writerow(["Cotton Shirt", "CS-001", "BC100001", "Shirts", "2500.00", "1200.00", "Premium cotton shirt"])
-    return Response(content=output.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=products_template.csv"})
-
-@api.post("/products/bulk-import")
-async def bulk_import_products(request: Request, file: UploadFile = File(...)):
-    await get_current_user(request)
-    contents = await file.read()
-    reader = csv.DictReader(io.StringIO(contents.decode("utf-8")))
-    results = {"created": 0, "skipped": 0, "errors": []}
-    for i, row in enumerate(reader):
-        try:
-            if not row.get("name") or not row.get("sku"):
-                results["errors"].append(f"Row {i+2}: name and sku required")
-                continue
-            existing = supabase.table("products").select("id").eq("sku", row["sku"]).execute()
-            if existing.data:
-                results["skipped"] += 1
-                results["errors"].append(f"Row {i+2}: SKU '{row['sku']}' already exists")
-                continue
-            data = {
-                "name": row["name"], "sku": row["sku"],
-                "barcode": row.get("barcode") or f"BC{str(uuid.uuid4().int)[:12]}",
-                "category": row.get("category", ""),
-                "unit_price": float(row.get("unit_price", 0)),
-                "cost_price": float(row.get("cost_price", 0)),
-                "description": row.get("description", ""),
-                "is_active": True
-            }
-            supabase.table("products").insert(data).execute()
-            results["created"] += 1
-        except Exception as e:
-            results["errors"].append(f"Row {i+2}: {str(e)[:80]}")
-    invalidate_cache("products")
-    return results
-
-@api.get("/inventory/template-csv")
-async def inventory_csv_template(request: Request):
-    await get_current_user(request)
-    products = supabase.table("products").select("sku, name").eq("is_active", True).limit(5).execute()
-    locations = supabase.table("locations").select("name").eq("is_active", True).limit(5).execute()
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["product_sku", "location_name", "quantity", "min_stock_level"])
-    if products.data and locations.data:
-        writer.writerow([products.data[0]["sku"], locations.data[0]["name"], "100", "10"])
-    else:
-        writer.writerow(["CS-001", "Main Outlet", "100", "10"])
-    return Response(content=output.getvalue(), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=inventory_template.csv"})
-
-@api.post("/inventory/bulk-import")
-async def bulk_import_inventory(request: Request, file: UploadFile = File(...)):
-    await get_current_user(request)
-    contents = await file.read()
-    reader = csv.DictReader(io.StringIO(contents.decode("utf-8")))
-    results = {"updated": 0, "created": 0, "errors": []}
-    for i, row in enumerate(reader):
-        try:
-            product = supabase.table("products").select("id").eq("sku", row.get("product_sku", "")).execute()
-            if not product.data:
-                results["errors"].append(f"Row {i+2}: Product SKU '{row.get('product_sku')}' not found")
-                continue
-            location = supabase.table("locations").select("id").eq("name", row.get("location_name", "")).execute()
-            if not location.data:
-                results["errors"].append(f"Row {i+2}: Location '{row.get('location_name')}' not found")
-                continue
-            pid, lid = product.data[0]["id"], location.data[0]["id"]
-            qty = float(row.get("quantity", 0))
-            min_stock = float(row.get("min_stock_level", 0))
-            existing = supabase.table("inventory").select("id").eq("product_id", pid).eq("location_id", lid).execute()
-            if existing.data:
-                supabase.table("inventory").update({"quantity": qty, "min_stock_level": min_stock, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", existing.data[0]["id"]).execute()
-                results["updated"] += 1
-            else:
-                supabase.table("inventory").insert({"product_id": pid, "location_id": lid, "quantity": qty, "min_stock_level": min_stock}).execute()
-                results["created"] += 1
-        except Exception as e:
-            results["errors"].append(f"Row {i+2}: {str(e)[:80]}")
-    invalidate_cache("inventory")
-    return results
 
 # ===================== CUSTOM ORDERS =====================
 

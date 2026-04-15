@@ -243,6 +243,114 @@ class ERPAPITester:
         success, settings = self.run_test("Get Settings", "GET", "settings", 200)
         return success
 
+    def test_manual_transactions(self):
+        """Test manual transactions CRUD"""
+        # List manual transactions
+        success, transactions = self.run_test("List Manual Transactions", "GET", "manual-transactions", 200)
+        if not success:
+            return False
+
+        # Create manual transaction
+        tx_data = {
+            "type": "expense",
+            "category": "Office Supplies",
+            "description": "Test expense transaction",
+            "amount": 500.0,
+            "transaction_date": "2024-01-15"
+        }
+        success, transaction = self.run_test("Create Manual Transaction", "POST", "manual-transactions", 200, data=tx_data)
+        if success:
+            print(f"   Created transaction ID: {transaction.get('id')}")
+        return success
+
+    def test_transaction_categories(self):
+        """Test transaction categories"""
+        # List categories
+        success, categories = self.run_test("List Transaction Categories", "GET", "transaction-categories", 200)
+        if not success:
+            return False
+
+        # Create category
+        cat_data = {
+            "name": f"Test Category {datetime.now().strftime('%H%M%S')}",
+            "type": "expense"
+        }
+        success, category = self.run_test("Create Transaction Category", "POST", "transaction-categories", 200, data=cat_data)
+        if success:
+            print(f"   Created category ID: {category.get('id')}")
+        return success
+
+    def test_custom_orders(self):
+        """Test custom orders CRUD"""
+        # List custom orders
+        success, orders = self.run_test("List Custom Orders", "GET", "custom-orders", 200)
+        if not success:
+            return False
+
+        # Create custom order
+        order_data = {
+            "customer_name": f"Test Customer {datetime.now().strftime('%H%M%S')}",
+            "customer_mobile": f"94{datetime.now().strftime('%H%M%S')}",
+            "description": "Test custom order",
+            "total_amount": 5000.0,
+            "advance_payment": 1000.0,
+            "items": [
+                {
+                    "item_type": "service",
+                    "description": "Custom tailoring",
+                    "quantity": 1,
+                    "unit_price": 5000.0
+                }
+            ]
+        }
+        success, order = self.run_test("Create Custom Order", "POST", "custom-orders", 200, data=order_data)
+        if not success:
+            return False
+        
+        order_id = order.get('id')
+        print(f"   Created order ID: {order_id}")
+
+        # Test status update
+        success, _ = self.run_test("Update Order Status", "PUT", f"custom-orders/{order_id}/status", 200, data={"status": "in_progress"})
+        if not success:
+            return False
+
+        # Test payment
+        payment_data = {
+            "amount": 2000.0,
+            "payment_method": "cash",
+            "payment_type": "balance"
+        }
+        success, _ = self.run_test("Add Order Payment", "POST", f"custom-orders/{order_id}/payment", 200, data=payment_data)
+        return success
+
+    def test_bulk_import_templates(self):
+        """Test bulk import template endpoints"""
+        # Products template
+        success, _ = self.run_test("Products CSV Template", "GET", "products/template-csv", 200)
+        if not success:
+            return False
+
+        # Inventory template
+        success, _ = self.run_test("Inventory CSV Template", "GET", "inventory/template-csv", 200)
+        return success
+
+    def test_pagination_and_caching(self):
+        """Test pagination and caching features"""
+        # Test products with pagination
+        success, products = self.run_test("Products with Pagination", "GET", "products?limit=10&offset=0", 200)
+        if not success:
+            return False
+        
+        # Test products with search (server-side)
+        success, search_results = self.run_test("Products Search", "GET", "products?search=test&limit=5", 200)
+        if not success:
+            return False
+
+        # Test inventory with pagination
+        success, inventory = self.run_test("Inventory with Pagination", "GET", "inventory?limit=10&offset=0", 200)
+        return success
+
 def main():
     print("🚀 Starting ERP Backend API Tests")
     print("=" * 50)
@@ -266,6 +374,12 @@ def main():
         ("Accounting Operations", tester.test_accounting_operations),
         ("Users Operations", tester.test_users_operations),
         ("Settings Operations", tester.test_settings_operations),
+        # New V2 features
+        ("Manual Transactions", tester.test_manual_transactions),
+        ("Transaction Categories", tester.test_transaction_categories),
+        ("Custom Orders", tester.test_custom_orders),
+        ("Bulk Import Templates", tester.test_bulk_import_templates),
+        ("Pagination and Caching", tester.test_pagination_and_caching),
     ]
     
     for test_name, test_func in tests:
