@@ -83,9 +83,46 @@
     background: #BFA588;
 }
 
-/* Print styles for receipts */
+/* Print styles for receipts - 80mm thermal printer */
 @media print {
+    body, html { 
+        background: white !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    body * { visibility: hidden; }
+    .receipt-content, .receipt-content * { visibility: visible; }
+    .receipt-content {
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: 80mm;
+        max-width: 80mm;
+        padding: 4mm !important;
+        margin: 0 !important;
+        font-size: 11px !important;
+        line-height: 1.3 !important;
+    }
+    .receipt-content h3 { font-size: 14px !important; }
+    .receipt-content .text-xs { font-size: 10px !important; }
+    .receipt-content .text-sm { font-size: 11px !important; }
+    .receipt-content .text-base { font-size: 12px !important; }
+    .receipt-content .text-lg { font-size: 14px !important; }
+    .receipt-content img { max-width: 30mm !important; max-height: 15mm !important; }
     .no-print { display: none !important; }
-    .print-only { display: block !important; }
-    body { background: white !important; }
+    /* Hide any overlay/modal backgrounds */
+    .fixed { position: static !important; background: transparent !important; }
+    .rounded-2xl { border-radius: 0 !important; box-shadow: none !important; }
+}
+
+/* Hide Emergent branding for white-label */
+[class*="emergent-badge"],
+[data-emergent],
+a[href*="emergent.sh"],
+div[style*="Made with"] {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
 }

@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import api from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
-import { CurrencyDollar, ShoppingCart, Package, Warning, Factory, Truck } from "@phosphor-icons/react";
+import { CurrencyDollar, ShoppingCart, Package, Warning, Factory, Truck, Scissors } from "@phosphor-icons/react";
 
 const StatCard = ({ icon: Icon, label, value, color = "navy" }) => (
   <div className="bg-white border border-beige-300 rounded-2xl p-6 shadow-[0_4px_20px_rgba(19,29,51,0.03)] animate-fade-in">
@@ -31,10 +31,11 @@ export default function DashboardPage() {
       try {
         const [statsRes, salesRes] = await Promise.all([
           api.get("/dashboard/stats"),
-          api.get("/sales").catch(() => ({ data: [] })),
+          api.get("/sales", { params: { limit: 8 } }).catch(() => ({ data: { data: [] } })),
         ]);
         setStats(statsRes.data);
-        setRecentSales((salesRes.data || []).slice(0, 8));
+        const salesData = salesRes.data?.data || salesRes.data || [];
+        setRecentSales(salesData.slice(0, 8));
       } catch (err) {
         console.error("Dashboard load error:", err);
       } finally {
@@ -68,6 +69,7 @@ export default function DashboardPage() {
         <StatCard icon={Warning} label="Low Stock" value={stats?.low_stock_items || 0} color={stats?.low_stock_items > 0 ? "danger" : "navy"} />
         <StatCard icon={Factory} label="Production" value={stats?.pending_production || 0} color="warning" />
         <StatCard icon={Truck} label="Purchases" value={stats?.pending_purchases || 0} />
+        <StatCard icon={Scissors} label="Custom Orders" value={stats?.active_custom_orders || 0} />
       </div>
 
       {/* Recent Sales */}

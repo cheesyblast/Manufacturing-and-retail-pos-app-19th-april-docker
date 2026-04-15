@@ -1,31 +1,41 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Plus, PencilSimple, Package, MagnifyingGlass } from "@phosphor-icons/react";
+import { Plus, PencilSimple, Package, MagnifyingGlass, UploadSimple, DownloadSimple } from "@phosphor-icons/react";
+import { toast } from "sonner";
 
 export default function ProductsPage() {
   const [products, setProducts] = useState([]);
+  const [totalProducts, setTotalProducts] = useState(0);
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ name: "", sku: "", barcode: "", category: "", description: "", unit_price: "", cost_price: "", image_url: "" });
   const [loading, setLoading] = useState(true);
+  const [importResult, setImportResult] = useState(null);
+  const fileInputRef = useRef(null);
 
-  const loadProducts = async () => {
+  const loadProducts = async (searchTerm) => {
     try {
-      const { data } = await api.get("/products");
-      setProducts(data || []);
+      const params = { limit: 200 };
+      if (searchTerm) params.search = searchTerm;
+      const { data } = await api.get("/products", { params });
+      setProducts(data?.data || data || []);
+      setTotalProducts(data?.total || 0);
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
   };
 
   useEffect(() => { loadProducts(); }, []);
 
-  const filtered = products.filter((p) => {
-    const s = search.toLowerCase();
-    return !s || p.name.toLowerCase().includes(s) || (p.sku||"").toLowerCase().includes(s) || (p.category||"").toLowerCase().includes(s);
-  });
+  // Debounced server-side search
+  useEffect(() => {
+    const timer = setTimeout(() => { loadProducts(search); }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  const categories = [...new Set(products.map(p => p.category).filter(Boolean))];
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -33,9 +43,31 @@ export default function ProductsPage() {
     try {
       if (editing) { await api.put(`/products/${editing}`, data); }
       else { await api.post("/products", data); }
-      loadProducts();
+      loadProducts(search);
       resetForm();
     } catch (err) { console.error(err); }
+  };
+
+  const downloadTemplate = async () => {
+    try {
+      const response = await api.get("/products/template-csv", { responseType: "blob" });
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const a = document.createElement("a"); a.href = url; a.download = "products_template.csv"; a.click();
+    } catch (err) { toast.error("Failed to download template"); }
+  };
+
+  const handleBulkImport = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const { data } = await api.post("/products/bulk-import", formData, { headers: { "Content-Type": "multipart/form-data" } });
+      setImportResult(data);
+      toast.success(`Created: ${data.created}, Skipped: ${data.skipped}`);
+      loadProducts(search);
+    } catch (err) { toast.error("Import failed"); }
+    finally { if (fileInputRef.current) fileInputRef.current.value = ""; }
   };
 
   const resetForm = () => {
@@ -50,8 +82,6 @@ export default function ProductsPage() {
     setShowForm(true);
   };
 
-  const categories = [...new Set(products.map(p => p.category).filter(Boolean))];
-
   return (
     <div data-testid="products-page" className="space-y-6">
       <div className="flex items-center justify-between">
@@ -59,9 +89,18 @@ export default function ProductsPage() {
           <h1 className="text-2xl sm:text-3xl font-heading font-medium text-navy-900 tracking-tight">Products</h1>
           <p className="text-navy-500 mt-1">Manage your finished goods catalog</p>
         </div>
-        <Button data-testid="add-product-button" onClick={() => setShowForm(true)} className="bg-navy-800 text-white hover:bg-navy-700 rounded-xl">
-          <Plus size={18} className="mr-2" /> Add Product
-        </Button>
+        <div className="flex gap-2">
+          <input ref={fileInputRef} type="file" accept=".csv" onChange={handleBulkImport} className="hidden" />
+          <Button onClick={downloadTemplate} className="bg-beige-200 text-navy-900 hover:bg-beige-300 rounded-xl">
+            <DownloadSimple size={18} className="mr-2" /> Template
+          </Button>
+          <Button onClick={() => fileInputRef.current?.click()} className="bg-beige-200 text-navy-900 hover:bg-beige-300 rounded-xl">
+            <UploadSimple size={18} className="mr-2" /> Import CSV
+          </Button>
+          <Button data-testid="add-product-button" onClick={() => setShowForm(true)} className="bg-navy-800 text-white hover:bg-navy-700 rounded-xl">
+            <Plus size={18} className="mr-2" /> Add Product
+          </Button>
+        </div>
       </div>
 
       <div className="flex gap-3">
@@ -90,10 +129,18 @@ export default function ProductsPage() {
         </div>
       )}
 
+      {importResult && (
+        <div className="bg-beige-50 border border-beige-300 rounded-xl p-4 text-sm">
+          <p className="text-navy-900 font-medium">Import Result: {importResult.created} created, {importResult.skipped} skipped</p>
+          {importResult.errors?.length > 0 && <ul className="mt-1 text-xs text-status-danger list-disc pl-4">{importResult.errors.slice(0, 5).map((e, i) => <li key={i}>{e}</li>)}</ul>}
+          <button onClick={() => setImportResult(null)} className="text-xs text-navy-500 mt-1 underline">Dismiss</button>
+        </div>
+      )}
+
       <div className="bg-white border border-beige-300 rounded-2xl overflow-hidden shadow-[0_4px_20px_rgba(19,29,51,0.03)]">
         {loading ? (
           <div className="flex items-center justify-center h-32"><div className="w-6 h-6 border-2 border-navy-800 border-t-transparent rounded-full animate-spin" /></div>
-        ) : filtered.length === 0 ? (
+        ) : products.length === 0 ? (
           <div className="p-8 text-center text-navy-500">No products found</div>
         ) : (
           <div className="overflow-x-auto">
@@ -107,7 +154,7 @@ export default function ProductsPage() {
                 <th className="text-right py-3 px-6 text-xs uppercase tracking-wider font-bold text-navy-500">Actions</th>
               </tr></thead>
               <tbody>
-                {filtered.map((p) => (
+                {products.map((p) => (
                   <tr key={p.id} className="border-b border-beige-200 hover:bg-beige-50 transition-colors">
                     <td className="py-3 px-6 text-sm text-navy-900 font-medium flex items-center gap-3">
                       <div className="w-9 h-9 rounded-lg bg-beige-200 flex items-center justify-center flex-shrink-0">

@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Plus, ArrowsLeftRight, MapPin, Warning } from "@phosphor-icons/react";
+import { Plus, ArrowsLeftRight, MapPin, Warning, UploadSimple, DownloadSimple } from "@phosphor-icons/react";
+import { toast } from "sonner";
 
 export default function InventoryPage() {
   const [inventory, setInventory] = useState([]);
@@ -16,21 +17,24 @@ export default function InventoryPage() {
   const [stockForm, setStockForm] = useState({ product_id: "", location_id: "", quantity: "", min_stock_level: "" });
   const [locationForm, setLocationForm] = useState({ name: "", type: "outlet", address: "" });
   const [loading, setLoading] = useState(true);
+  const invFileRef = useRef(null);
+  const [importResult, setImportResult] = useState(null);
 
   const load = async () => {
     try {
       const [invRes, locRes, prodRes] = await Promise.all([
-        api.get("/inventory", { params: selectedLocation ? { location_id: selectedLocation } : {} }),
+        api.get("/inventory", { params: selectedLocation ? { location_id: selectedLocation, limit: 500 } : { limit: 500 } }),
         api.get("/locations"),
-        api.get("/products"),
+        api.get("/products", { params: { limit: 500 } }),
       ]);
-      setInventory(invRes.data || []);
+      setInventory(invRes.data?.data || invRes.data || []);
       setLocations(locRes.data || []);
-      setProducts(prodRes.data || []);
+      setProducts(prodRes.data?.data || prodRes.data || []);
     } catch (err) { console.error(err); }
     finally { setLoading(false); }
   };
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [selectedLocation]);
 
   const handleAddStock = async (e) => {
@@ -74,6 +78,18 @@ export default function InventoryPage() {
           <p className="text-navy-500 mt-1">Track stock across all locations</p>
         </div>
         <div className="flex gap-2">
+          <input ref={invFileRef} type="file" accept=".csv" onChange={async (e) => {
+            const file = e.target.files?.[0]; if (!file) return;
+            const formData = new FormData(); formData.append("file", file);
+            try { const { data } = await api.post("/inventory/bulk-import", formData, { headers: { "Content-Type": "multipart/form-data" } }); setImportResult(data); toast.success(`Created: ${data.created}, Updated: ${data.updated}`); load(); }
+            catch { toast.error("Import failed"); }
+            finally { if (invFileRef.current) invFileRef.current.value = ""; }
+          }} className="hidden" />
+          <Button onClick={async () => {
+            try { const r = await api.get("/inventory/template-csv", { responseType: "blob" }); const url = window.URL.createObjectURL(new Blob([r.data])); const a = document.createElement("a"); a.href = url; a.download = "inventory_template.csv"; a.click(); }
+            catch { toast.error("Failed"); }
+          }} className="bg-beige-200 text-navy-900 hover:bg-beige-300 rounded-xl"><DownloadSimple size={18} className="mr-1" /> Template</Button>
+          <Button onClick={() => invFileRef.current?.click()} className="bg-beige-200 text-navy-900 hover:bg-beige-300 rounded-xl"><UploadSimple size={18} className="mr-1" /> Import</Button>
           <Button onClick={() => setShowAddLocation(true)} className="bg-beige-200 text-navy-900 hover:bg-beige-300 rounded-xl">
             <MapPin size={18} className="mr-2" /> Add Location
           </Button>

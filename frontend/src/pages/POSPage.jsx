@@ -21,6 +21,7 @@ export default function POSPage() {
   const [receiptData, setReceiptData] = useState(null);
   const [paymentMethod, setPaymentMethod] = useState("cash");
   const [discount, setDiscount] = useState(0);
+  const [amountTendered, setAmountTendered] = useState(0);
   const [locations, setLocations] = useState([]);
   const [selectedLocation, setSelectedLocation] = useState("");
   const [newCustomer, setNewCustomer] = useState({ name: "", mobile: "", email: "" });
@@ -31,10 +32,11 @@ export default function POSPage() {
     const load = async () => {
       try {
         const [prodRes, locRes] = await Promise.all([
-          api.get("/products"),
+          api.get("/products", { params: { limit: 500 } }),
           api.get("/locations"),
         ]);
-        setProducts(prodRes.data || []);
+        const prodData = prodRes.data?.data || prodRes.data || [];
+        setProducts(prodData);
         const outlets = (locRes.data || []).filter((l) => l.type === "outlet");
         setLocations(outlets);
         if (outlets.length > 0) setSelectedLocation(outlets[0].id);
@@ -121,6 +123,7 @@ export default function POSPage() {
       };
       const { data: sale } = await api.post("/sales", saleData);
       const { data: receipt } = await api.get(`/sales/${sale.id}/receipt`);
+      receipt.amount_tendered = amountTendered;
       setReceiptData(receipt);
       setShowCheckout(false);
       setShowReceipt(true);
@@ -376,6 +379,16 @@ export default function POSPage() {
                 </div>
               </div>
 
+              {paymentMethod === "cash" && (
+                <div className="space-y-2">
+                  <label className="text-xs uppercase tracking-[0.2em] font-bold text-beige-500">Amount Tendered</label>
+                  <Input data-testid="amount-tendered" type="number" value={amountTendered} onChange={(e) => setAmountTendered(parseFloat(e.target.value) || 0)} className="bg-white border-beige-300 rounded-xl" />
+                  {amountTendered >= total && amountTendered > 0 && (
+                    <div className="flex justify-between bg-status-success-bg rounded-xl p-3 text-sm"><span className="text-status-success font-medium">Change Due</span><span className="text-status-success font-bold">Rs {(amountTendered - total).toLocaleString()}</span></div>
+                  )}
+                </div>
+              )}
+
               <Button
                 data-testid="confirm-checkout-button"
                 onClick={handleCheckout}
@@ -392,31 +405,46 @@ export default function POSPage() {
       {/* Receipt Modal */}
       {showReceipt && receiptData && (
         <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onClick={() => setShowReceipt(false)}>
-          <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl" onClick={(e) => e.stopPropagation()} data-testid="receipt-modal">
-            <div className="text-center mb-4">
-              <h3 className="font-heading font-bold text-navy-900 text-lg">{receiptData.business_name || "TextileERP"}</h3>
-              {receiptData.business_address && <p className="text-xs text-navy-500">{receiptData.business_address}</p>}
-              <p className="text-xs text-navy-500 mt-1">{receiptData.sale?.invoice_number}</p>
-              <p className="text-xs text-navy-500">{new Date(receiptData.sale?.created_at).toLocaleString()}</p>
-            </div>
-            <div className="border-t border-dashed border-beige-300 py-3 space-y-1">
-              {(receiptData.items || []).map((item, i) => (
-                <div key={i} className="flex justify-between text-sm">
-                  <span className="text-navy-700">{item.product_name} x{item.quantity}</span>
-                  <span className="text-navy-900 font-medium">Rs {parseFloat(item.total).toLocaleString()}</span>
+          <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full" onClick={(e) => e.stopPropagation()} data-testid="receipt-modal">
+            {/* Printable Receipt */}
+            <div id="receipt-print" className="p-6 receipt-content">
+              <div className="text-center mb-4">
+                {receiptData.business_logo && <img src={receiptData.business_logo} alt="" className="w-12 h-12 mx-auto mb-2 object-contain" />}
+                <h3 className="font-heading font-bold text-navy-900 text-lg">{receiptData.business_name || "TextileERP"}</h3>
+                {receiptData.business_address && <p className="text-xs text-navy-500">{receiptData.business_address}</p>}
+                {receiptData.business_phone && <p className="text-xs text-navy-500">{receiptData.business_phone}</p>}
+                <div className="border-t border-dashed border-beige-300 mt-3 pt-2">
+                  <p className="text-xs text-navy-500 font-mono">{receiptData.sale?.invoice_number}</p>
+                  <p className="text-xs text-navy-500">{new Date(receiptData.sale?.created_at).toLocaleString()}</p>
+                  {receiptData.sale?.customer_name && <p className="text-xs text-navy-700 mt-1">Customer: {receiptData.sale.customer_name}</p>}
                 </div>
-              ))}
+              </div>
+              <div className="border-t border-dashed border-beige-300 py-3 space-y-1.5">
+                {(receiptData.items || []).map((item, i) => (
+                  <div key={i} className="flex justify-between text-sm">
+                    <div className="flex-1"><span className="text-navy-700">{item.product_name}</span><br/><span className="text-xs text-navy-500">x{item.quantity} @ Rs {parseFloat(item.unit_price).toLocaleString()}</span></div>
+                    <span className="text-navy-900 font-medium whitespace-nowrap ml-2">Rs {parseFloat(item.total).toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="border-t border-dashed border-beige-300 pt-3 space-y-1">
+                <div className="flex justify-between text-sm"><span className="text-navy-500">Subtotal</span><span>Rs {parseFloat(receiptData.sale?.subtotal).toLocaleString()}</span></div>
+                {parseFloat(receiptData.sale?.discount_amount) > 0 && <div className="flex justify-between text-sm"><span className="text-navy-500">Discount</span><span>-Rs {parseFloat(receiptData.sale?.discount_amount).toLocaleString()}</span></div>}
+                {parseFloat(receiptData.sale?.tax_amount) > 0 && <div className="flex justify-between text-sm"><span className="text-navy-500">Tax</span><span>Rs {parseFloat(receiptData.sale?.tax_amount).toLocaleString()}</span></div>}
+                <div className="flex justify-between text-base font-bold border-t border-dashed border-beige-300 pt-2"><span>TOTAL</span><span>Rs {parseFloat(receiptData.sale?.total).toLocaleString()}</span></div>
+                <div className="border-t border-dashed border-beige-300 pt-2 mt-2">
+                  <p className="text-xs text-navy-500">Payment: <span className="capitalize">{receiptData.sale?.payment_method}</span></p>
+                  {receiptData.amount_tendered > 0 && <>
+                    <p className="text-xs text-navy-500">Tendered: Rs {parseFloat(receiptData.amount_tendered).toLocaleString()}</p>
+                    <p className="text-xs text-navy-700 font-medium">Change: Rs {(parseFloat(receiptData.amount_tendered) - parseFloat(receiptData.sale?.total)).toLocaleString()}</p>
+                  </>}
+                </div>
+                <p className="text-xs text-navy-400 text-center mt-3">Thank you for your purchase!</p>
+              </div>
             </div>
-            <div className="border-t border-dashed border-beige-300 pt-3 space-y-1">
-              <div className="flex justify-between text-sm"><span className="text-navy-500">Subtotal</span><span>Rs {parseFloat(receiptData.sale?.subtotal).toLocaleString()}</span></div>
-              {parseFloat(receiptData.sale?.discount_amount) > 0 && (
-                <div className="flex justify-between text-sm"><span className="text-navy-500">Discount</span><span>-Rs {parseFloat(receiptData.sale?.discount_amount).toLocaleString()}</span></div>
-              )}
-              <div className="flex justify-between text-base font-bold"><span>TOTAL</span><span>Rs {parseFloat(receiptData.sale?.total).toLocaleString()}</span></div>
-              <p className="text-xs text-navy-500 text-center mt-2">Payment: {receiptData.sale?.payment_method}</p>
-            </div>
-            <div className="mt-4 flex gap-2">
-              <Button onClick={() => window.print()} className="flex-1 bg-beige-200 text-navy-900 hover:bg-beige-300 rounded-xl">Print</Button>
+            {/* Non-print buttons */}
+            <div className="px-6 pb-6 flex gap-2 no-print">
+              <Button onClick={() => { window.print(); }} className="flex-1 bg-beige-200 text-navy-900 hover:bg-beige-300 rounded-xl">Print</Button>
               <Button onClick={() => setShowReceipt(false)} className="flex-1 bg-navy-800 text-white hover:bg-navy-700 rounded-xl">Done</Button>
             </div>
           </div>

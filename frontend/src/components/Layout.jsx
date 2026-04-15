@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
+import api from "@/lib/api";
 import {
   House, ShoppingCart, Package, Factory, Truck, ChartBar,
-  Gear, Users, SignOut, List, CaretLeft
+  Gear, Users, SignOut, List, CaretLeft, Scissors
 } from "@phosphor-icons/react";
 
 const navItems = [
@@ -11,6 +12,7 @@ const navItems = [
   { path: "/pos", label: "Point of Sale", icon: ShoppingCart, roles: ["admin", "cashier"] },
   { path: "/products", label: "Products", icon: Package, roles: ["admin", "cashier"] },
   { path: "/inventory", label: "Inventory", icon: Package, roles: ["admin", "production_staff"] },
+  { path: "/custom-orders", label: "Custom Orders", icon: Scissors, roles: ["admin", "cashier"] },
   { path: "/purchasing", label: "Purchasing", icon: Truck, roles: ["admin"] },
   { path: "/manufacturing", label: "Manufacturing", icon: Factory, roles: ["admin", "production_staff"] },
   { path: "/accounting", label: "Accounting", icon: ChartBar, roles: ["admin"] },
@@ -18,12 +20,27 @@ const navItems = [
   { path: "/settings", label: "Settings", icon: Gear, roles: ["admin"] },
 ];
 
+const DEFAULT_LOGO = "https://static.prod-images.emergentagent.com/jobs/9efb1b10-3182-4939-931e-3975c608d93e/images/fc3fe8419e8ec531202d0fb5cfb69d923536da9c0eca71d51c578fb78b1ad5ee.png";
+
 export default function Layout({ children }) {
   const { user, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [brandName, setBrandName] = useState("TextileERP");
+  const [logoUrl, setLogoUrl] = useState(DEFAULT_LOGO);
+
+  useEffect(() => {
+    const loadBrand = async () => {
+      try {
+        const { data } = await api.get("/settings");
+        if (data.business_name) setBrandName(data.business_name);
+        if (data.logo_url) setLogoUrl(data.logo_url);
+      } catch {}
+    };
+    loadBrand();
+  }, []);
 
   const filteredNav = navItems.filter((item) => item.roles.includes(user?.role));
 
@@ -53,12 +70,8 @@ export default function Layout({ children }) {
         data-testid="app-sidebar"
       >
         <div className={`flex items-center gap-3 p-5 border-b border-white/10 ${collapsed ? "justify-center" : ""}`}>
-          <img
-            src="https://static.prod-images.emergentagent.com/jobs/9efb1b10-3182-4939-931e-3975c608d93e/images/fc3fe8419e8ec531202d0fb5cfb69d923536da9c0eca71d51c578fb78b1ad5ee.png"
-            alt="Logo"
-            className="w-8 h-8 flex-shrink-0"
-          />
-          {!collapsed && <span className="font-heading font-medium text-lg tracking-tight">TextileERP</span>}
+          <img src={logoUrl} alt="Logo" className="w-8 h-8 flex-shrink-0 rounded-lg object-contain" />
+          {!collapsed && <span className="font-heading font-medium text-lg tracking-tight">{brandName}</span>}
         </div>
 
         <nav className="flex-1 py-4 px-3 space-y-1 overflow-y-auto">
