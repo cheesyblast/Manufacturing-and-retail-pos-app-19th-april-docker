@@ -26,20 +26,23 @@ export default function POSPage() {
   const [selectedLocation, setSelectedLocation] = useState("");
   const [newCustomer, setNewCustomer] = useState({ name: "", mobile: "", email: "" });
   const [processing, setProcessing] = useState(false);
+  const [taxSettings, setTaxSettings] = useState({ tax_active: false, vat_rate: 18, sscl_rate: 2.5 });
   const barcodeRef = useRef(null);
 
   useEffect(() => {
     const load = async () => {
       try {
-        const [prodRes, locRes] = await Promise.all([
+        const [prodRes, locRes, taxRes] = await Promise.all([
           api.get("/products", { params: { limit: 500 } }),
           api.get("/locations"),
+          api.get("/tax-settings").catch(() => ({ data: { tax_active: false, vat_rate: 18, sscl_rate: 2.5 } })),
         ]);
         const prodData = prodRes.data?.data || prodRes.data || [];
         setProducts(prodData);
         const outlets = (locRes.data || []).filter((l) => l.type === "outlet");
         setLocations(outlets);
         if (outlets.length > 0) setSelectedLocation(outlets[0].id);
+        setTaxSettings(taxRes.data);
       } catch (err) {
         console.error("POS load error:", err);
       }
@@ -69,7 +72,11 @@ export default function POSPage() {
   const removeItem = (productId) => setCart((prev) => prev.filter((i) => i.product_id !== productId));
 
   const subtotal = cart.reduce((sum, i) => sum + i.unit_price * i.quantity, 0);
-  const total = subtotal - discount;
+  const taxable = subtotal - discount;
+  const vatAmount = taxSettings.tax_active ? Math.round(taxable * taxSettings.vat_rate / 100 * 100) / 100 : 0;
+  const ssclAmount = taxSettings.tax_active ? Math.round(taxable * taxSettings.sscl_rate / 100 * 100) / 100 : 0;
+  const totalTax = vatAmount + ssclAmount;
+  const total = subtotal - discount + totalTax;
 
   const lookupCustomer = async () => {
     if (!customerSearch.trim()) return;
@@ -279,6 +286,18 @@ export default function POSPage() {
               <span className="text-status-success">-Rs {discount.toLocaleString()}</span>
             </div>
           )}
+          {taxSettings.tax_active && (
+            <>
+              <div className="flex justify-between text-sm">
+                <span className="text-navy-500">VAT ({taxSettings.vat_rate}%)</span>
+                <span className="text-navy-700">Rs {vatAmount.toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-navy-500">SSCL ({taxSettings.sscl_rate}%)</span>
+                <span className="text-navy-700">Rs {ssclAmount.toLocaleString()}</span>
+              </div>
+            </>
+          )}
           <div className="flex justify-between text-lg font-bold border-t border-beige-200 pt-3">
             <span className="text-navy-900">Total</span>
             <span className="text-navy-900">Rs {total.toLocaleString()}</span>
@@ -373,6 +392,12 @@ export default function POSPage() {
               <div className="bg-beige-50 rounded-xl p-4 space-y-2">
                 <div className="flex justify-between text-sm"><span className="text-navy-500">Subtotal</span><span>Rs {subtotal.toLocaleString()}</span></div>
                 <div className="flex justify-between text-sm"><span className="text-navy-500">Discount</span><span>-Rs {discount.toLocaleString()}</span></div>
+                {taxSettings.tax_active && (
+                  <>
+                    <div className="flex justify-between text-sm"><span className="text-navy-500">VAT ({taxSettings.vat_rate}%)</span><span>Rs {vatAmount.toLocaleString()}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-navy-500">SSCL ({taxSettings.sscl_rate}%)</span><span>Rs {ssclAmount.toLocaleString()}</span></div>
+                  </>
+                )}
                 <div className="flex justify-between text-lg font-bold border-t border-beige-300 pt-2">
                   <span className="text-navy-900">Total</span>
                   <span className="text-navy-900">Rs {total.toLocaleString()}</span>
@@ -430,7 +455,9 @@ export default function POSPage() {
               <div className="border-t border-dashed border-beige-300 pt-3 space-y-1">
                 <div className="flex justify-between text-sm"><span className="text-navy-500">Subtotal</span><span>Rs {parseFloat(receiptData.sale?.subtotal).toLocaleString()}</span></div>
                 {parseFloat(receiptData.sale?.discount_amount) > 0 && <div className="flex justify-between text-sm"><span className="text-navy-500">Discount</span><span>-Rs {parseFloat(receiptData.sale?.discount_amount).toLocaleString()}</span></div>}
-                {parseFloat(receiptData.sale?.tax_amount) > 0 && <div className="flex justify-between text-sm"><span className="text-navy-500">Tax</span><span>Rs {parseFloat(receiptData.sale?.tax_amount).toLocaleString()}</span></div>}
+                {parseFloat(receiptData.sale?.vat_amount) > 0 && <div className="flex justify-between text-sm"><span className="text-navy-500">VAT</span><span>Rs {parseFloat(receiptData.sale?.vat_amount).toLocaleString()}</span></div>}
+                {parseFloat(receiptData.sale?.sscl_amount) > 0 && <div className="flex justify-between text-sm"><span className="text-navy-500">SSCL</span><span>Rs {parseFloat(receiptData.sale?.sscl_amount).toLocaleString()}</span></div>}
+                {parseFloat(receiptData.sale?.tax_amount) > 0 && !parseFloat(receiptData.sale?.vat_amount) && <div className="flex justify-between text-sm"><span className="text-navy-500">Tax</span><span>Rs {parseFloat(receiptData.sale?.tax_amount).toLocaleString()}</span></div>}
                 <div className="flex justify-between text-base font-bold border-t border-dashed border-beige-300 pt-2"><span>TOTAL</span><span>Rs {parseFloat(receiptData.sale?.total).toLocaleString()}</span></div>
                 <div className="border-t border-dashed border-beige-300 pt-2 mt-2">
                   <p className="text-xs text-navy-500">Payment: <span className="capitalize">{receiptData.sale?.payment_method}</span></p>

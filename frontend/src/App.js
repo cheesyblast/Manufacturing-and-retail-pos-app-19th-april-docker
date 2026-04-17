@@ -14,6 +14,7 @@ import UsersPage from "@/pages/UsersPage";
 import SettingsPage from "@/pages/SettingsPage";
 import SetupPage from "@/pages/SetupPage";
 import CustomOrdersPage from "@/pages/CustomOrdersPage";
+import ReconciliationPage from "@/pages/ReconciliationPage";
 
 function ProtectedRoute({ children, roles }) {
   const { user, loading } = useAuth();
@@ -58,6 +59,7 @@ function AppRoutes() {
       <Route path="/purchasing" element={<ProtectedRoute roles={["admin"]}><PurchasingPage /></ProtectedRoute>} />
       <Route path="/manufacturing" element={<ProtectedRoute roles={["admin", "production_staff"]}><ManufacturingPage /></ProtectedRoute>} />
       <Route path="/accounting" element={<ProtectedRoute roles={["admin"]}><AccountingPage /></ProtectedRoute>} />
+      <Route path="/reconciliation" element={<ProtectedRoute roles={["admin", "cashier"]}><ReconciliationPage /></ProtectedRoute>} />
       <Route path="/custom-orders" element={<ProtectedRoute roles={["admin", "cashier"]}><CustomOrdersPage /></ProtectedRoute>} />
       <Route path="/users" element={<ProtectedRoute roles={["admin"]}><UsersPage /></ProtectedRoute>} />
       <Route path="/settings" element={<ProtectedRoute roles={["admin"]}><SettingsPage /></ProtectedRoute>} />

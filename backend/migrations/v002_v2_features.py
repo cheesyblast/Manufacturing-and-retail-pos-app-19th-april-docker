@@ -3,8 +3,8 @@ VERSION = "002"
 DESCRIPTION = "V2 features - manual transactions, transaction categories, custom orders"
 
 
-def up(cursor):
-    cursor.execute("""
+def up(executor):
+    executor.execute("""
     -- Manual Transactions
     CREATE TABLE IF NOT EXISTS manual_transactions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -84,8 +84,8 @@ def up(cursor):
         "custom_orders", "custom_order_items", "custom_order_payments",
     ]
     for table in new_tables:
-        cursor.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")
-        cursor.execute(f"""
+        executor.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")
+        executor.execute(f"""
             DO $$ BEGIN
                 CREATE POLICY "Allow all for {table}" ON {table}
                     FOR ALL USING (true) WITH CHECK (true);
@@ -94,7 +94,7 @@ def up(cursor):
         """)
 
     # Seed default transaction categories
-    cursor.execute("""
+    executor.execute("""
         INSERT INTO transaction_categories (name, type, is_default) VALUES
         ('Scrap Fabric Sales', 'income', true),
         ('Thread Waste Sales', 'income', true),

@@ -4,7 +4,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import api from "@/lib/api";
 import {
   House, ShoppingCart, Package, Factory, Truck, ChartBar,
-  Gear, Users, SignOut, List, CaretLeft, Scissors
+  Gear, Users, SignOut, List, CaretLeft, Scissors, CashRegister
 } from "@phosphor-icons/react";
 
 const navItems = [
@@ -13,6 +13,7 @@ const navItems = [
   { path: "/products", label: "Products", icon: Package, roles: ["admin", "cashier"] },
   { path: "/inventory", label: "Inventory", icon: Package, roles: ["admin", "production_staff"] },
   { path: "/custom-orders", label: "Custom Orders", icon: Scissors, roles: ["admin", "cashier"] },
+  { path: "/reconciliation", label: "Reconciliation", icon: CashRegister, roles: ["admin", "cashier"] },
   { path: "/purchasing", label: "Purchasing", icon: Truck, roles: ["admin"] },
   { path: "/manufacturing", label: "Manufacturing", icon: Factory, roles: ["admin", "production_staff"] },
   { path: "/accounting", label: "Accounting", icon: ChartBar, roles: ["admin"] },

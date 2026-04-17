@@ -15,7 +15,7 @@ export default function PurchasingPage() {
   const [showPODetail, setShowPODetail] = useState(null);
   const [supplierForm, setSupplierForm] = useState({ name: "", contact_person: "", phone: "", email: "", address: "" });
   const [materialForm, setMaterialForm] = useState({ name: "", sku: "", unit: "kg", quantity: 0, unit_cost: 0, reorder_level: 0, supplier_id: "" });
-  const [poForm, setPOForm] = useState({ supplier_id: "", notes: "", items: [{ raw_material_id: "", raw_material_name: "", quantity: "", unit_cost: "" }] });
+  const [poForm, setPOForm] = useState({ supplier_id: "", notes: "", global_charges: 0, items: [{ raw_material_id: "", raw_material_name: "", quantity: "", unit_cost: "" }] });
   const [loading, setLoading] = useState(true);
 
   const load = async () => {
@@ -48,7 +48,7 @@ export default function PurchasingPage() {
       const rm = rawMaterials.find(r => r.id === i.raw_material_id);
       return { raw_material_id: i.raw_material_id, raw_material_name: rm?.name || "", quantity: parseFloat(i.quantity), unit_cost: parseFloat(i.unit_cost) };
     });
-    try { await api.post("/purchase-orders", { supplier_id: poForm.supplier_id, items, notes: poForm.notes }); load(); setShowPOForm(false); }
+    try { await api.post("/purchase-orders", { supplier_id: poForm.supplier_id, items, notes: poForm.notes, global_charges: parseFloat(poForm.global_charges) || 0 }); load(); setShowPOForm(false); }
     catch (err) { console.error(err); }
   };
 
@@ -227,6 +227,11 @@ export default function PurchasingPage() {
                 </div>
               ))}
               <Button type="button" onClick={() => setPOForm({...poForm, items: [...poForm.items, { raw_material_id: "", raw_material_name: "", quantity: "", unit_cost: "" }]})} className="text-sm bg-beige-200 text-navy-700 hover:bg-beige-300 rounded-xl">+ Add Item</Button>
+              <div className="space-y-1">
+                <label className="text-xs uppercase tracking-[0.15em] font-bold text-beige-500">Global Charges (Shipping + Customs)</label>
+                <Input data-testid="po-global-charges" type="number" step="0.01" value={poForm.global_charges} onChange={(e) => setPOForm({...poForm, global_charges: e.target.value})} placeholder="0.00" className="bg-white border-beige-300 rounded-xl" />
+                <p className="text-xs text-navy-400">Distributed proportionally across items to calculate landed cost</p>
+              </div>
               <Input value={poForm.notes} onChange={(e) => setPOForm({...poForm, notes: e.target.value})} placeholder="Notes" className="bg-white border-beige-300 rounded-xl" />
               <div className="flex gap-2">
                 <Button type="submit" className="bg-navy-800 text-white hover:bg-navy-700 rounded-xl">Create PO</Button>
@@ -242,12 +247,12 @@ export default function PurchasingPage() {
         <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onClick={() => setShowPODetail(null)}>
           <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-xl" onClick={(e) => e.stopPropagation()}>
             <h3 className="font-heading font-medium text-navy-900 text-xl mb-2">{showPODetail.po_number}</h3>
-            <p className="text-sm text-navy-500 mb-4">Supplier: {showPODetail.suppliers?.name} | Status: <span className="capitalize">{showPODetail.status}</span></p>
+            <p className="text-sm text-navy-500 mb-4">Supplier: {showPODetail.suppliers?.name} | Status: <span className="capitalize">{showPODetail.status}</span>{showPODetail.global_charges > 0 && ` | Global Charges: Rs ${parseFloat(showPODetail.global_charges).toLocaleString()}`}</p>
             <div className="space-y-2 mb-4">
               {(showPODetail.items || []).map((item, i) => (
                 <div key={i} className="flex justify-between p-3 bg-beige-50 rounded-xl">
                   <span className="text-sm text-navy-700">{item.raw_material_name || "Material"}</span>
-                  <span className="text-sm text-navy-900 font-medium">Qty: {item.quantity} | Rs {parseFloat(item.total_cost).toLocaleString()}</span>
+                  <span className="text-sm text-navy-900 font-medium">Qty: {item.quantity} | Rs {parseFloat(item.total_cost).toLocaleString()}{item.unit_landed_cost > 0 && ` | Landed: Rs ${parseFloat(item.unit_landed_cost).toLocaleString()}/unit`}</span>
                 </div>
               ))}
             </div>

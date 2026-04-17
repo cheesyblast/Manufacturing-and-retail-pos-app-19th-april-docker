@@ -3,8 +3,8 @@ VERSION = "001"
 DESCRIPTION = "Initial schema - users, suppliers, raw materials, purchase orders, locations, products, inventory, BOM, production, customers, sales, expenses, settings"
 
 
-def up(cursor):
-    cursor.execute("""
+def up(executor):
+    executor.execute("""
     -- Users
     CREATE TABLE IF NOT EXISTS users (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -246,8 +246,10 @@ def up(cursor):
         value TEXT,
         updated_at TIMESTAMPTZ DEFAULT NOW()
     );
+    """)
 
-    -- Indexes
+    # Indexes
+    executor.execute("""
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
     CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
     CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
@@ -260,7 +262,7 @@ def up(cursor):
     CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date);
     """)
 
-    # RLS policies - use DO block to handle IF NOT EXISTS for policies
+    # RLS policies
     tables = [
         "users", "suppliers", "raw_materials", "purchase_orders",
         "purchase_order_items", "locations", "products", "inventory",
@@ -269,8 +271,8 @@ def up(cursor):
         "sales", "sale_items", "payments", "expenses", "app_settings",
     ]
     for table in tables:
-        cursor.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")
-        cursor.execute(f"""
+        executor.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")
+        executor.execute(f"""
             DO $$ BEGIN
                 CREATE POLICY "Allow all for {table}" ON {table}
                     FOR ALL USING (true) WITH CHECK (true);

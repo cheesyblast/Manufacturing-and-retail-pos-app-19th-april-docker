@@ -15,7 +15,7 @@ export default function ManufacturingPage() {
   const [showOrderForm, setShowOrderForm] = useState(false);
   const [showOrderDetail, setShowOrderDetail] = useState(null);
   const [showLogForm, setShowLogForm] = useState(null);
-  const [bomForm, setBomForm] = useState({ product_id: "", name: "", description: "", output_quantity: 1, items: [{ raw_material_id: "", quantity: "", unit: "kg" }] });
+  const [bomForm, setBomForm] = useState({ product_id: "", name: "", description: "", output_quantity: 1, items: [{ raw_material_id: "", quantity: "", unit: "kg", wastage_percent: 0 }] });
   const [orderForm, setOrderForm] = useState({ bom_id: "", product_id: "", quantity_planned: "", location_id: "", notes: "" });
   const [logForm, setLogForm] = useState({ quantity_produced: "", notes: "" });
   const [loading, setLoading] = useState(true);
@@ -40,7 +40,7 @@ export default function ManufacturingPage() {
     e.preventDefault();
     const items = bomForm.items.filter(i => i.raw_material_id && i.quantity).map(i => {
       const rm = rawMaterials.find(r => r.id === i.raw_material_id);
-      return { raw_material_id: i.raw_material_id, raw_material_name: rm?.name || "", quantity: parseFloat(i.quantity), unit: i.unit };
+      return { raw_material_id: i.raw_material_id, raw_material_name: rm?.name || "", quantity: parseFloat(i.quantity), unit: i.unit, wastage_percent: parseFloat(i.wastage_percent) || 0 };
     });
     try { await api.post("/bom", { ...bomForm, output_quantity: parseFloat(bomForm.output_quantity), items }); load(); setShowBOMForm(false); }
     catch (err) { console.error(err); }
@@ -167,9 +167,10 @@ export default function ManufacturingPage() {
                     {rawMaterials.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                   </select>
                   <Input type="number" value={item.quantity} onChange={(e) => { const items = [...bomForm.items]; items[i].quantity = e.target.value; setBomForm({...bomForm, items}); }} placeholder="Qty" required className="w-20 bg-white border-beige-300 rounded-xl" />
+                  <Input type="number" value={item.wastage_percent} onChange={(e) => { const items = [...bomForm.items]; items[i].wastage_percent = e.target.value; setBomForm({...bomForm, items}); }} placeholder="Waste%" className="w-20 bg-white border-beige-300 rounded-xl" title="Wastage %" />
                 </div>
               ))}
-              <Button type="button" onClick={() => setBomForm({...bomForm, items: [...bomForm.items, { raw_material_id: "", quantity: "", unit: "kg" }]})} className="text-sm bg-beige-200 text-navy-700 hover:bg-beige-300 rounded-xl">+ Add Material</Button>
+              <Button type="button" onClick={() => setBomForm({...bomForm, items: [...bomForm.items, { raw_material_id: "", quantity: "", unit: "kg", wastage_percent: 0 }]})} className="text-sm bg-beige-200 text-navy-700 hover:bg-beige-300 rounded-xl">+ Add Material</Button>
               <div className="flex gap-2">
                 <Button type="submit" className="bg-navy-800 text-white hover:bg-navy-700 rounded-xl">Create BOM</Button>
                 <Button type="button" onClick={() => setShowBOMForm(false)} className="bg-beige-200 text-navy-900 hover:bg-beige-300 rounded-xl">Cancel</Button>
