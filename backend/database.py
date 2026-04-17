@@ -5,10 +5,29 @@ from pathlib import Path
 
 load_dotenv(Path(__file__).parent / '.env')
 
-SUPABASE_URL = os.environ.get('SUPABASE_URL')
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
+supabase: Client = None
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in .env")
+def init_supabase(url=None, key=None):
+    global supabase
+    url = url or os.environ.get('SUPABASE_URL')
+    key = key or os.environ.get('SUPABASE_KEY')
+    if url and key:
+        supabase = create_client(url, key)
+    return supabase
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+def get_supabase() -> Client:
+    if not supabase:
+        raise RuntimeError("Database not configured. Complete the setup wizard at /setup.")
+    return supabase
+
+def is_configured():
+    return supabase is not None
+
+# Auto-initialize if credentials exist
+_url = os.environ.get('SUPABASE_URL')
+_key = os.environ.get('SUPABASE_KEY')
+if _url and _key:
+    try:
+        init_supabase(_url, _key)
+    except Exception:
+        pass

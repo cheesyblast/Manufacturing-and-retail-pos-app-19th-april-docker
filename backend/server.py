@@ -1,23 +1,33 @@
 from dotenv import load_dotenv
 from pathlib import Path
-load_dotenv(Path(__file__).parent / '.env')
+
+ENV_PATH = Path(__file__).parent / '.env'
+load_dotenv(ENV_PATH)
 
 from fastapi import FastAPI, APIRouter, Request, HTTPException, Depends, Response, File, UploadFile
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 import os
 import logging
 import uuid
 import base64
 import csv
 import io
+import secrets
+import re
 from datetime import datetime, timezone, date, timedelta
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from database import supabase
+import database
+from database import get_supabase, is_configured, init_supabase
 from auth import (
     hash_password, verify_password, create_access_token,
     get_current_user, require_role, decode_token
 )
+
+# Dynamic supabase accessor - always get the current client
+def _sb():
+    return get_supabase()
 
 # Simple in-memory cache
 _cache = {}
@@ -39,7 +49,28 @@ def invalidate_cache(prefix=""):
         _cache.pop(k, None)
         _cache_ttl.pop(k, None)
 
+def is_setup_complete():
+    return os.environ.get("SETUP_COMPLETE", "").lower() == "true" and is_configured()
+
 app = FastAPI(title="ERP Manufacturing & Retail")
+
+# Middleware: block non-setup routes when not configured
+class SetupGuardMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        # Always allow setup endpoints, health check, and static assets
+        if path.startswith("/api/setup") or path.startswith("/api/health") or not path.startswith("/api/"):
+            return await call_next(request)
+        # Block API calls if not configured
+        if not is_setup_complete():
+            return Response(
+                content='{"detail":"App not configured. Complete setup at /setup."}',
+                status_code=503,
+                media_type="application/json"
+            )
+        return await call_next(request)
+
+app.add_middleware(SetupGuardMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,6 +84,30 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 api = APIRouter(prefix="/api")
+
+# Helper to write/update .env file
+def write_env(updates: dict):
+    env_lines = []
+    existing_keys = set()
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text().splitlines():
+            stripped = line.strip()
+            if '=' in stripped and not stripped.startswith('#'):
+                key = stripped.split('=', 1)[0].strip()
+                if key in updates:
+                    env_lines.append(f"{key}={updates[key]}")
+                    existing_keys.add(key)
+                else:
+                    env_lines.append(line)
+            else:
+                env_lines.append(line)
+    for key, value in updates.items():
+        if key not in existing_keys:
+            env_lines.append(f"{key}={value}")
+    ENV_PATH.write_text('\n'.join(env_lines) + '\n')
+    # Also update os.environ immediately
+    for key, value in updates.items():
+        os.environ[key] = value
 
 # ===================== PYDANTIC MODELS =====================
 
@@ -226,7 +281,7 @@ class CustomOrderPaymentCreate(BaseModel):
 @api.post("/auth/login")
 async def login(req: LoginRequest, response: Response):
     try:
-        result = supabase.table("users").select("*").eq("email", req.email.lower()).execute()
+        result = _sb().table("users").select("*").eq("email", req.email.lower()).execute()
         if not result.data:
             raise HTTPException(status_code=401, detail="Invalid credentials")
         user = result.data[0]
@@ -246,7 +301,7 @@ async def login(req: LoginRequest, response: Response):
 @api.post("/auth/register")
 async def register(req: RegisterRequest, response: Response):
     try:
-        existing = supabase.table("users").select("id").eq("email", req.email.lower()).execute()
+        existing = _sb().table("users").select("id").eq("email", req.email.lower()).execute()
         if existing.data:
             raise HTTPException(status_code=400, detail="Email already registered")
         user_data = {
@@ -258,7 +313,7 @@ async def register(req: RegisterRequest, response: Response):
         }
         if req.location_id:
             user_data["location_id"] = req.location_id
-        result = supabase.table("users").insert(user_data).execute()
+        result = _sb().table("users").insert(user_data).execute()
         user = result.data[0]
         token = create_access_token(user["id"], user["email"], user["role"])
         response.set_cookie(key="access_token", value=token, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
@@ -272,7 +327,7 @@ async def register(req: RegisterRequest, response: Response):
 @api.get("/auth/me")
 async def get_me(request: Request):
     user_payload = await get_current_user(request)
-    result = supabase.table("users").select("id, email, name, role, is_active, location_id").eq("id", user_payload["sub"]).execute()
+    result = _sb().table("users").select("id, email, name, role, is_active, location_id").eq("id", user_payload["sub"]).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="User not found")
     return result.data[0]
@@ -287,19 +342,19 @@ async def logout(response: Response):
 @api.get("/users")
 async def list_users(request: Request):
     await require_role("admin")(request)
-    result = supabase.table("users").select("id, email, name, role, is_active, location_id, created_at, locations(name, type)").order("created_at", desc=True).execute()
+    result = _sb().table("users").select("id, email, name, role, is_active, location_id, created_at, locations(name, type)").order("created_at", desc=True).execute()
     return result.data
 
 @api.post("/users")
 async def create_user(req: RegisterRequest, request: Request):
     await require_role("admin")(request)
-    existing = supabase.table("users").select("id").eq("email", req.email.lower()).execute()
+    existing = _sb().table("users").select("id").eq("email", req.email.lower()).execute()
     if existing.data:
         raise HTTPException(status_code=400, detail="Email already exists")
     user_data = {"email": req.email.lower(), "password_hash": hash_password(req.password), "name": req.name, "role": req.role, "is_active": True}
     if req.location_id:
         user_data["location_id"] = req.location_id
-    result = supabase.table("users").insert(user_data).execute()
+    result = _sb().table("users").insert(user_data).execute()
     u = result.data[0]
     return {"id": u["id"], "email": u["email"], "name": u["name"], "role": u["role"], "location_id": u.get("location_id")}
 
@@ -313,7 +368,7 @@ async def update_user(user_id: str, request: Request):
             update_data[k] = body[k]
     if "password" in body and body["password"]:
         update_data["password_hash"] = hash_password(body["password"])
-    result = supabase.table("users").update(update_data).eq("id", user_id).execute()
+    result = _sb().table("users").update(update_data).eq("id", user_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="User not found")
     u = result.data[0]
@@ -322,7 +377,7 @@ async def update_user(user_id: str, request: Request):
 @api.delete("/users/{user_id}")
 async def delete_user(user_id: str, request: Request):
     await require_role("admin")(request)
-    supabase.table("users").delete().eq("id", user_id).execute()
+    _sb().table("users").delete().eq("id", user_id).execute()
     return {"message": "User deleted"}
 
 # ===================== SUPPLIERS ROUTES =====================
@@ -330,7 +385,7 @@ async def delete_user(user_id: str, request: Request):
 @api.get("/suppliers")
 async def list_suppliers(request: Request):
     await get_current_user(request)
-    result = supabase.table("suppliers").select("*").eq("is_active", True).order("name").execute()
+    result = _sb().table("suppliers").select("*").eq("is_active", True).order("name").execute()
     return result.data
 
 @api.post("/suppliers")
@@ -338,14 +393,14 @@ async def create_supplier(req: SupplierCreate, request: Request):
     await get_current_user(request)
     data = req.model_dump(exclude_none=True)
     data["is_active"] = True
-    result = supabase.table("suppliers").insert(data).execute()
+    result = _sb().table("suppliers").insert(data).execute()
     return result.data[0]
 
 @api.put("/suppliers/{sid}")
 async def update_supplier(sid: str, request: Request):
     await get_current_user(request)
     body = await request.json()
-    result = supabase.table("suppliers").update(body).eq("id", sid).execute()
+    result = _sb().table("suppliers").update(body).eq("id", sid).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Supplier not found")
     return result.data[0]
@@ -353,7 +408,7 @@ async def update_supplier(sid: str, request: Request):
 @api.delete("/suppliers/{sid}")
 async def delete_supplier(sid: str, request: Request):
     await get_current_user(request)
-    supabase.table("suppliers").update({"is_active": False}).eq("id", sid).execute()
+    _sb().table("suppliers").update({"is_active": False}).eq("id", sid).execute()
     return {"message": "Supplier deactivated"}
 
 # ===================== RAW MATERIALS ROUTES =====================
@@ -361,7 +416,7 @@ async def delete_supplier(sid: str, request: Request):
 @api.get("/raw-materials")
 async def list_raw_materials(request: Request):
     await get_current_user(request)
-    result = supabase.table("raw_materials").select("*, suppliers(name)").order("name").execute()
+    result = _sb().table("raw_materials").select("*, suppliers(name)").order("name").execute()
     return result.data
 
 @api.post("/raw-materials")
@@ -370,14 +425,14 @@ async def create_raw_material(req: RawMaterialCreate, request: Request):
     data = req.model_dump(exclude_none=True)
     if not data.get("sku"):
         data["sku"] = f"RM-{str(uuid.uuid4())[:8].upper()}"
-    result = supabase.table("raw_materials").insert(data).execute()
+    result = _sb().table("raw_materials").insert(data).execute()
     return result.data[0]
 
 @api.put("/raw-materials/{rmid}")
 async def update_raw_material(rmid: str, request: Request):
     await get_current_user(request)
     body = await request.json()
-    result = supabase.table("raw_materials").update(body).eq("id", rmid).execute()
+    result = _sb().table("raw_materials").update(body).eq("id", rmid).execute()
     return result.data[0] if result.data else {}
 
 # ===================== PURCHASE ORDERS ROUTES =====================
@@ -385,16 +440,16 @@ async def update_raw_material(rmid: str, request: Request):
 @api.get("/purchase-orders")
 async def list_purchase_orders(request: Request):
     await get_current_user(request)
-    result = supabase.table("purchase_orders").select("*, suppliers(name)").order("created_at", desc=True).execute()
+    result = _sb().table("purchase_orders").select("*, suppliers(name)").order("created_at", desc=True).execute()
     return result.data
 
 @api.get("/purchase-orders/{po_id}")
 async def get_purchase_order(po_id: str, request: Request):
     await get_current_user(request)
-    po = supabase.table("purchase_orders").select("*, suppliers(name)").eq("id", po_id).execute()
+    po = _sb().table("purchase_orders").select("*, suppliers(name)").eq("id", po_id).execute()
     if not po.data:
         raise HTTPException(status_code=404, detail="PO not found")
-    items = supabase.table("purchase_order_items").select("*").eq("purchase_order_id", po_id).execute()
+    items = _sb().table("purchase_order_items").select("*").eq("purchase_order_id", po_id).execute()
     return {**po.data[0], "items": items.data}
 
 @api.post("/purchase-orders")
@@ -404,7 +459,7 @@ async def create_purchase_order(req: PurchaseOrderCreateV2, request: Request):
     items_total = sum(item.get("quantity", 0) * item.get("unit_cost", 0) for item in req.items)
     total = items_total + req.global_charges
     po_data = {"po_number": po_number, "supplier_id": req.supplier_id, "status": "draft", "total_amount": total, "global_charges": req.global_charges, "notes": req.notes, "created_by": user["sub"]}
-    po_result = supabase.table("purchase_orders").insert(po_data).execute()
+    po_result = _sb().table("purchase_orders").insert(po_data).execute()
     po = po_result.data[0]
     for item in req.items:
         item_cost = item["quantity"] * item["unit_cost"]
@@ -422,7 +477,7 @@ async def create_purchase_order(req: PurchaseOrderCreateV2, request: Request):
             "unit_landed_cost": round(unit_landed, 2),
             "variant_id": item.get("variant_id")
         }
-        supabase.table("purchase_order_items").insert(item_data).execute()
+        _sb().table("purchase_order_items").insert(item_data).execute()
     return po
 
 @api.put("/purchase-orders/{po_id}")
@@ -430,22 +485,22 @@ async def update_purchase_order(po_id: str, request: Request):
     await get_current_user(request)
     body = await request.json()
     update_fields = {k: v for k, v in body.items() if k in ["status", "notes"]}
-    result = supabase.table("purchase_orders").update(update_fields).eq("id", po_id).execute()
+    result = _sb().table("purchase_orders").update(update_fields).eq("id", po_id).execute()
     return result.data[0] if result.data else {}
 
 @api.post("/purchase-orders/{po_id}/receive")
 async def receive_purchase_order(po_id: str, request: Request):
     await get_current_user(request)
-    items = supabase.table("purchase_order_items").select("*").eq("purchase_order_id", po_id).execute()
+    items = _sb().table("purchase_order_items").select("*").eq("purchase_order_id", po_id).execute()
     for item in items.data:
         rm_id = item.get("raw_material_id")
         if rm_id:
-            rm = supabase.table("raw_materials").select("quantity").eq("id", rm_id).execute()
+            rm = _sb().table("raw_materials").select("quantity").eq("id", rm_id).execute()
             if rm.data:
                 new_qty = float(rm.data[0]["quantity"]) + float(item["quantity"])
-                supabase.table("raw_materials").update({"quantity": new_qty}).eq("id", rm_id).execute()
-            supabase.table("purchase_order_items").update({"received_quantity": item["quantity"]}).eq("id", item["id"]).execute()
-    supabase.table("purchase_orders").update({"status": "received", "received_date": datetime.now(timezone.utc).isoformat()}).eq("id", po_id).execute()
+                _sb().table("raw_materials").update({"quantity": new_qty}).eq("id", rm_id).execute()
+            _sb().table("purchase_order_items").update({"received_quantity": item["quantity"]}).eq("id", item["id"]).execute()
+    _sb().table("purchase_orders").update({"status": "received", "received_date": datetime.now(timezone.utc).isoformat()}).eq("id", po_id).execute()
     return {"message": "Purchase order received and materials updated"}
 
 # ===================== LOCATIONS ROUTES =====================
@@ -453,7 +508,7 @@ async def receive_purchase_order(po_id: str, request: Request):
 @api.get("/locations")
 async def list_locations(request: Request):
     await get_current_user(request)
-    result = supabase.table("locations").select("*").eq("is_active", True).order("name").execute()
+    result = _sb().table("locations").select("*").eq("is_active", True).order("name").execute()
     return result.data
 
 @api.post("/locations")
@@ -461,14 +516,14 @@ async def create_location(req: LocationCreate, request: Request):
     await get_current_user(request)
     data = req.model_dump()
     data["is_active"] = True
-    result = supabase.table("locations").insert(data).execute()
+    result = _sb().table("locations").insert(data).execute()
     return result.data[0]
 
 @api.put("/locations/{lid}")
 async def update_location(lid: str, request: Request):
     await get_current_user(request)
     body = await request.json()
-    result = supabase.table("locations").update(body).eq("id", lid).execute()
+    result = _sb().table("locations").update(body).eq("id", lid).execute()
     return result.data[0] if result.data else {}
 
 # ===================== PRODUCTS ROUTES =====================
@@ -480,7 +535,7 @@ async def list_products(request: Request, search: Optional[str] = None, category
     cached = get_cached(cache_key)
     if cached:
         return cached
-    query = supabase.table("products").select("*", count="exact").eq("is_active", True)
+    query = _sb().table("products").select("*", count="exact").eq("is_active", True)
     if category:
         query = query.eq("category", category)
     if search:
@@ -509,7 +564,7 @@ async def bulk_import_products(request: Request, file: UploadFile = File(...)):
             if not row.get("name") or not row.get("sku"):
                 results["errors"].append(f"Row {i+2}: name and sku required")
                 continue
-            existing = supabase.table("products").select("id").eq("sku", row["sku"]).execute()
+            existing = _sb().table("products").select("id").eq("sku", row["sku"]).execute()
             if existing.data:
                 results["skipped"] += 1
                 results["errors"].append(f"Row {i+2}: SKU '{row['sku']}' already exists")
@@ -523,7 +578,7 @@ async def bulk_import_products(request: Request, file: UploadFile = File(...)):
                 "description": row.get("description", ""),
                 "is_active": True
             }
-            supabase.table("products").insert(data).execute()
+            _sb().table("products").insert(data).execute()
             results["created"] += 1
         except Exception as e:
             results["errors"].append(f"Row {i+2}: {str(e)[:80]}")
@@ -533,7 +588,7 @@ async def bulk_import_products(request: Request, file: UploadFile = File(...)):
 @api.get("/products/barcode/{barcode}")
 async def get_product_by_barcode(barcode: str, request: Request):
     await get_current_user(request)
-    result = supabase.table("products").select("*").eq("barcode", barcode).eq("is_active", True).execute()
+    result = _sb().table("products").select("*").eq("barcode", barcode).eq("is_active", True).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Product not found")
     return result.data[0]
@@ -541,7 +596,7 @@ async def get_product_by_barcode(barcode: str, request: Request):
 @api.get("/products/{pid}")
 async def get_product(pid: str, request: Request):
     await get_current_user(request)
-    result = supabase.table("products").select("*").eq("id", pid).execute()
+    result = _sb().table("products").select("*").eq("id", pid).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Product not found")
     return result.data[0]
@@ -553,7 +608,7 @@ async def create_product(req: ProductCreate, request: Request):
     data["is_active"] = True
     if not data.get("barcode"):
         data["barcode"] = f"BC{str(uuid.uuid4().int)[:12]}"
-    result = supabase.table("products").insert(data).execute()
+    result = _sb().table("products").insert(data).execute()
     invalidate_cache("products")
     return result.data[0]
 
@@ -561,13 +616,13 @@ async def create_product(req: ProductCreate, request: Request):
 async def update_product(pid: str, request: Request):
     await get_current_user(request)
     body = await request.json()
-    result = supabase.table("products").update(body).eq("id", pid).execute()
+    result = _sb().table("products").update(body).eq("id", pid).execute()
     return result.data[0] if result.data else {}
 
 @api.delete("/products/{pid}")
 async def delete_product(pid: str, request: Request):
     await get_current_user(request)
-    supabase.table("products").update({"is_active": False}).eq("id", pid).execute()
+    _sb().table("products").update({"is_active": False}).eq("id", pid).execute()
     return {"message": "Product deactivated"}
 
 # ===================== INVENTORY ROUTES =====================
@@ -575,7 +630,7 @@ async def delete_product(pid: str, request: Request):
 @api.get("/inventory")
 async def list_inventory(request: Request, location_id: Optional[str] = None, limit: int = 200, offset: int = 0):
     await get_current_user(request)
-    query = supabase.table("inventory").select("*, products(name, sku, barcode, unit_price, cost_price, category), locations(name, type)", count="exact")
+    query = _sb().table("inventory").select("*, products(name, sku, barcode, unit_price, cost_price, category), locations(name, type)", count="exact")
     if location_id:
         query = query.eq("location_id", location_id)
     result = query.range(offset, offset + limit - 1).execute()
@@ -584,12 +639,12 @@ async def list_inventory(request: Request, location_id: Optional[str] = None, li
 @api.post("/inventory")
 async def upsert_inventory(req: InventoryUpdate, request: Request):
     await get_current_user(request)
-    existing = supabase.table("inventory").select("id, quantity").eq("product_id", req.product_id).eq("location_id", req.location_id).execute()
+    existing = _sb().table("inventory").select("id, quantity").eq("product_id", req.product_id).eq("location_id", req.location_id).execute()
     if existing.data:
-        result = supabase.table("inventory").update({"quantity": req.quantity, "min_stock_level": req.min_stock_level, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", existing.data[0]["id"]).execute()
+        result = _sb().table("inventory").update({"quantity": req.quantity, "min_stock_level": req.min_stock_level, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", existing.data[0]["id"]).execute()
     else:
         data = {"product_id": req.product_id, "location_id": req.location_id, "quantity": req.quantity, "min_stock_level": req.min_stock_level}
-        result = supabase.table("inventory").insert(data).execute()
+        result = _sb().table("inventory").insert(data).execute()
     return result.data[0] if result.data else {}
 
 @api.post("/inventory/transfer")
@@ -597,33 +652,33 @@ async def create_stock_transfer(req: StockTransferCreate, request: Request):
     user = await get_current_user(request)
     transfer_number = f"ST-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
     transfer_data = {"transfer_number": transfer_number, "from_location_id": req.from_location_id, "to_location_id": req.to_location_id, "status": "completed", "notes": req.notes, "created_by": user["sub"]}
-    transfer_result = supabase.table("stock_transfers").insert(transfer_data).execute()
+    transfer_result = _sb().table("stock_transfers").insert(transfer_data).execute()
     transfer = transfer_result.data[0]
     for item in req.items:
-        supabase.table("stock_transfer_items").insert({"transfer_id": transfer["id"], "product_id": item["product_id"], "product_name": item.get("product_name", ""), "quantity": item["quantity"]}).execute()
-        from_inv = supabase.table("inventory").select("id, quantity").eq("product_id", item["product_id"]).eq("location_id", req.from_location_id).execute()
+        _sb().table("stock_transfer_items").insert({"transfer_id": transfer["id"], "product_id": item["product_id"], "product_name": item.get("product_name", ""), "quantity": item["quantity"]}).execute()
+        from_inv = _sb().table("inventory").select("id, quantity").eq("product_id", item["product_id"]).eq("location_id", req.from_location_id).execute()
         if from_inv.data:
             new_from_qty = max(0, float(from_inv.data[0]["quantity"]) - float(item["quantity"]))
-            supabase.table("inventory").update({"quantity": new_from_qty, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", from_inv.data[0]["id"]).execute()
-        to_inv = supabase.table("inventory").select("id, quantity").eq("product_id", item["product_id"]).eq("location_id", req.to_location_id).execute()
+            _sb().table("inventory").update({"quantity": new_from_qty, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", from_inv.data[0]["id"]).execute()
+        to_inv = _sb().table("inventory").select("id, quantity").eq("product_id", item["product_id"]).eq("location_id", req.to_location_id).execute()
         if to_inv.data:
             new_to_qty = float(to_inv.data[0]["quantity"]) + float(item["quantity"])
-            supabase.table("inventory").update({"quantity": new_to_qty, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", to_inv.data[0]["id"]).execute()
+            _sb().table("inventory").update({"quantity": new_to_qty, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", to_inv.data[0]["id"]).execute()
         else:
-            supabase.table("inventory").insert({"product_id": item["product_id"], "location_id": req.to_location_id, "quantity": item["quantity"]}).execute()
+            _sb().table("inventory").insert({"product_id": item["product_id"], "location_id": req.to_location_id, "quantity": item["quantity"]}).execute()
     return transfer
 
 @api.get("/stock-transfers")
 async def list_stock_transfers(request: Request):
     await get_current_user(request)
-    result = supabase.table("stock_transfers").select("*, from_location:locations!stock_transfers_from_location_id_fkey(name), to_location:locations!stock_transfers_to_location_id_fkey(name)").order("created_at", desc=True).execute()
+    result = _sb().table("stock_transfers").select("*, from_location:locations!stock_transfers_from_location_id_fkey(name), to_location:locations!stock_transfers_to_location_id_fkey(name)").order("created_at", desc=True).execute()
     return result.data
 
 @api.get("/inventory/template-csv")
 async def inventory_csv_template(request: Request):
     await get_current_user(request)
-    products = supabase.table("products").select("sku, name").eq("is_active", True).limit(5).execute()
-    locations = supabase.table("locations").select("name").eq("is_active", True).limit(5).execute()
+    products = _sb().table("products").select("sku, name").eq("is_active", True).limit(5).execute()
+    locations = _sb().table("locations").select("name").eq("is_active", True).limit(5).execute()
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(["product_sku", "location_name", "quantity", "min_stock_level"])
@@ -641,23 +696,23 @@ async def bulk_import_inventory(request: Request, file: UploadFile = File(...)):
     results = {"updated": 0, "created": 0, "errors": []}
     for i, row in enumerate(reader):
         try:
-            product = supabase.table("products").select("id").eq("sku", row.get("product_sku", "")).execute()
+            product = _sb().table("products").select("id").eq("sku", row.get("product_sku", "")).execute()
             if not product.data:
                 results["errors"].append(f"Row {i+2}: Product SKU '{row.get('product_sku')}' not found")
                 continue
-            location = supabase.table("locations").select("id").eq("name", row.get("location_name", "")).execute()
+            location = _sb().table("locations").select("id").eq("name", row.get("location_name", "")).execute()
             if not location.data:
                 results["errors"].append(f"Row {i+2}: Location '{row.get('location_name')}' not found")
                 continue
             pid, lid = product.data[0]["id"], location.data[0]["id"]
             qty = float(row.get("quantity", 0))
             min_stock = float(row.get("min_stock_level", 0))
-            existing = supabase.table("inventory").select("id").eq("product_id", pid).eq("location_id", lid).execute()
+            existing = _sb().table("inventory").select("id").eq("product_id", pid).eq("location_id", lid).execute()
             if existing.data:
-                supabase.table("inventory").update({"quantity": qty, "min_stock_level": min_stock, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", existing.data[0]["id"]).execute()
+                _sb().table("inventory").update({"quantity": qty, "min_stock_level": min_stock, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", existing.data[0]["id"]).execute()
                 results["updated"] += 1
             else:
-                supabase.table("inventory").insert({"product_id": pid, "location_id": lid, "quantity": qty, "min_stock_level": min_stock}).execute()
+                _sb().table("inventory").insert({"product_id": pid, "location_id": lid, "quantity": qty, "min_stock_level": min_stock}).execute()
                 results["created"] += 1
         except Exception as e:
             results["errors"].append(f"Row {i+2}: {str(e)[:80]}")
@@ -669,26 +724,26 @@ async def bulk_import_inventory(request: Request, file: UploadFile = File(...)):
 @api.get("/bom")
 async def list_bom(request: Request):
     await get_current_user(request)
-    result = supabase.table("bill_of_materials").select("*, products(name, sku)").order("name").execute()
+    result = _sb().table("bill_of_materials").select("*, products(name, sku)").order("name").execute()
     return result.data
 
 @api.get("/bom/{bom_id}")
 async def get_bom(bom_id: str, request: Request):
     await get_current_user(request)
-    bom = supabase.table("bill_of_materials").select("*, products(name, sku)").eq("id", bom_id).execute()
+    bom = _sb().table("bill_of_materials").select("*, products(name, sku)").eq("id", bom_id).execute()
     if not bom.data:
         raise HTTPException(status_code=404, detail="BOM not found")
-    items = supabase.table("bom_items").select("*").eq("bom_id", bom_id).execute()
+    items = _sb().table("bom_items").select("*").eq("bom_id", bom_id).execute()
     return {**bom.data[0], "items": items.data}
 
 @api.post("/bom")
 async def create_bom(req: BOMCreate, request: Request):
     await get_current_user(request)
     bom_data = {"product_id": req.product_id, "name": req.name, "description": req.description, "output_quantity": req.output_quantity}
-    bom_result = supabase.table("bill_of_materials").insert(bom_data).execute()
+    bom_result = _sb().table("bill_of_materials").insert(bom_data).execute()
     bom = bom_result.data[0]
     for item in req.items:
-        supabase.table("bom_items").insert({"bom_id": bom["id"], "raw_material_id": item["raw_material_id"], "raw_material_name": item.get("raw_material_name", ""), "quantity": item["quantity"], "unit": item.get("unit", "kg"), "wastage_percent": item.get("wastage_percent", 0)}).execute()
+        _sb().table("bom_items").insert({"bom_id": bom["id"], "raw_material_id": item["raw_material_id"], "raw_material_name": item.get("raw_material_name", ""), "quantity": item["quantity"], "unit": item.get("unit", "kg"), "wastage_percent": item.get("wastage_percent", 0)}).execute()
     return bom
 
 @api.put("/bom/{bom_id}")
@@ -697,11 +752,11 @@ async def update_bom(bom_id: str, request: Request):
     body = await request.json()
     update_fields = {k: v for k, v in body.items() if k in ["name", "description", "output_quantity", "product_id"]}
     if update_fields:
-        supabase.table("bill_of_materials").update(update_fields).eq("id", bom_id).execute()
+        _sb().table("bill_of_materials").update(update_fields).eq("id", bom_id).execute()
     if "items" in body:
-        supabase.table("bom_items").delete().eq("bom_id", bom_id).execute()
+        _sb().table("bom_items").delete().eq("bom_id", bom_id).execute()
         for item in body["items"]:
-            supabase.table("bom_items").insert({"bom_id": bom_id, "raw_material_id": item["raw_material_id"], "raw_material_name": item.get("raw_material_name", ""), "quantity": item["quantity"], "unit": item.get("unit", "kg"), "wastage_percent": item.get("wastage_percent", 0)}).execute()
+            _sb().table("bom_items").insert({"bom_id": bom_id, "raw_material_id": item["raw_material_id"], "raw_material_name": item.get("raw_material_name", ""), "quantity": item["quantity"], "unit": item.get("unit", "kg"), "wastage_percent": item.get("wastage_percent", 0)}).execute()
     return {"message": "BOM updated"}
 
 # ===================== PRODUCTION ORDERS ROUTES =====================
@@ -709,30 +764,30 @@ async def update_bom(bom_id: str, request: Request):
 @api.get("/production-orders")
 async def list_production_orders(request: Request):
     await get_current_user(request)
-    result = supabase.table("production_orders").select("*").order("created_at", desc=True).execute()
+    result = _sb().table("production_orders").select("*").order("created_at", desc=True).execute()
     return result.data
 
 @api.get("/production-orders/{po_id}")
 async def get_production_order(po_id: str, request: Request):
     await get_current_user(request)
-    po = supabase.table("production_orders").select("*").eq("id", po_id).execute()
+    po = _sb().table("production_orders").select("*").eq("id", po_id).execute()
     if not po.data:
         raise HTTPException(status_code=404, detail="Production order not found")
-    logs = supabase.table("production_logs").select("*").eq("production_order_id", po_id).order("logged_at", desc=True).execute()
+    logs = _sb().table("production_logs").select("*").eq("production_order_id", po_id).order("logged_at", desc=True).execute()
     return {**po.data[0], "logs": logs.data}
 
 @api.post("/production-orders")
 async def create_production_order(req: ProductionOrderCreate, request: Request):
     user = await get_current_user(request)
     order_number = f"PRD-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{str(uuid.uuid4())[:4].upper()}"
-    product = supabase.table("products").select("name").eq("id", req.product_id).execute()
+    product = _sb().table("products").select("name").eq("id", req.product_id).execute()
     product_name = product.data[0]["name"] if product.data else ""
     data = {
         "order_number": order_number, "bom_id": req.bom_id, "product_id": req.product_id,
         "product_name": product_name, "quantity_planned": req.quantity_planned,
         "status": "planned", "location_id": req.location_id, "notes": req.notes, "created_by": user["sub"]
     }
-    result = supabase.table("production_orders").insert(data).execute()
+    result = _sb().table("production_orders").insert(data).execute()
     return result.data[0]
 
 @api.put("/production-orders/{po_id}")
@@ -740,15 +795,15 @@ async def update_production_order(po_id: str, request: Request):
     await get_current_user(request)
     body = await request.json()
     update_fields = {k: v for k, v in body.items() if k in ["status", "notes", "start_date", "end_date"]}
-    result = supabase.table("production_orders").update(update_fields).eq("id", po_id).execute()
+    result = _sb().table("production_orders").update(update_fields).eq("id", po_id).execute()
     return result.data[0] if result.data else {}
 
 @api.post("/production-orders/{po_id}/log")
 async def log_production(po_id: str, req: ProductionLogCreate, request: Request):
     user = await get_current_user(request)
     log_data = {"production_order_id": po_id, "logged_by": user["sub"], "logged_by_name": user.get("email", ""), "quantity_produced": req.quantity_produced, "notes": req.notes}
-    supabase.table("production_logs").insert(log_data).execute()
-    po = supabase.table("production_orders").select("quantity_produced, quantity_planned, product_id, location_id, bom_id").eq("id", po_id).execute()
+    _sb().table("production_logs").insert(log_data).execute()
+    po = _sb().table("production_orders").select("quantity_produced, quantity_planned, product_id, location_id, bom_id").eq("id", po_id).execute()
     if po.data:
         new_total = float(po.data[0]["quantity_produced"] or 0) + req.quantity_produced
         update_data = {"quantity_produced": new_total}
@@ -763,32 +818,32 @@ async def log_production(po_id: str, req: ProductionLogCreate, request: Request)
         total_material_cost = 0
         total_wastage_cost = 0
         if bom_id:
-            bom = supabase.table("bill_of_materials").select("output_quantity").eq("id", bom_id).execute()
-            bom_items = supabase.table("bom_items").select("*").eq("bom_id", bom_id).execute()
+            bom = _sb().table("bill_of_materials").select("output_quantity").eq("id", bom_id).execute()
+            bom_items = _sb().table("bom_items").select("*").eq("bom_id", bom_id).execute()
             output_qty = float(bom.data[0]["output_quantity"]) if bom.data else 1
             for bi in bom_items.data:
                 wastage_pct = float(bi.get("wastage_percent", 0)) / 100
                 base_qty = float(bi["quantity"]) * (req.quantity_produced / output_qty)
                 actual_qty = base_qty * (1 + wastage_pct)
                 wastage_qty = base_qty * wastage_pct
-                rm = supabase.table("raw_materials").select("quantity, unit_cost").eq("id", bi["raw_material_id"]).execute()
+                rm = _sb().table("raw_materials").select("quantity, unit_cost").eq("id", bi["raw_material_id"]).execute()
                 if rm.data:
                     unit_cost = float(rm.data[0].get("unit_cost", 0))
                     total_material_cost += base_qty * unit_cost
                     total_wastage_cost += wastage_qty * unit_cost
                     new_rm_qty = max(0, float(rm.data[0]["quantity"]) - actual_qty)
-                    supabase.table("raw_materials").update({"quantity": new_rm_qty}).eq("id", bi["raw_material_id"]).execute()
+                    _sb().table("raw_materials").update({"quantity": new_rm_qty}).eq("id", bi["raw_material_id"]).execute()
             update_data["material_cost"] = round(total_material_cost, 2)
             update_data["wastage_cost"] = round(total_wastage_cost, 2)
-        supabase.table("production_orders").update(update_data).eq("id", po_id).execute()
+        _sb().table("production_orders").update(update_data).eq("id", po_id).execute()
         product_id = po.data[0]["product_id"]
         location_id = po.data[0].get("location_id")
         if product_id and location_id:
-            inv = supabase.table("inventory").select("id, quantity").eq("product_id", product_id).eq("location_id", location_id).execute()
+            inv = _sb().table("inventory").select("id, quantity").eq("product_id", product_id).eq("location_id", location_id).execute()
             if inv.data:
-                supabase.table("inventory").update({"quantity": float(inv.data[0]["quantity"]) + req.quantity_produced, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", inv.data[0]["id"]).execute()
+                _sb().table("inventory").update({"quantity": float(inv.data[0]["quantity"]) + req.quantity_produced, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", inv.data[0]["id"]).execute()
             else:
-                supabase.table("inventory").insert({"product_id": product_id, "location_id": location_id, "quantity": req.quantity_produced}).execute()
+                _sb().table("inventory").insert({"product_id": product_id, "location_id": location_id, "quantity": req.quantity_produced}).execute()
     return {"message": "Production logged", "quantity_produced": req.quantity_produced}
 
 # ===================== CUSTOMERS ROUTES =====================
@@ -796,7 +851,7 @@ async def log_production(po_id: str, req: ProductionLogCreate, request: Request)
 @api.get("/customers")
 async def list_customers(request: Request, search: Optional[str] = None):
     await get_current_user(request)
-    result = supabase.table("customers").select("*").order("name").execute()
+    result = _sb().table("customers").select("*").order("name").execute()
     data = result.data
     if search:
         s = search.lower()
@@ -806,7 +861,7 @@ async def list_customers(request: Request, search: Optional[str] = None):
 @api.get("/customers/mobile/{mobile}")
 async def get_customer_by_mobile(mobile: str, request: Request):
     await get_current_user(request)
-    result = supabase.table("customers").select("*").eq("mobile", mobile).execute()
+    result = _sb().table("customers").select("*").eq("mobile", mobile).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Customer not found")
     return result.data[0]
@@ -815,14 +870,14 @@ async def get_customer_by_mobile(mobile: str, request: Request):
 async def create_customer(req: CustomerCreate, request: Request):
     await get_current_user(request)
     data = req.model_dump(exclude_none=True)
-    result = supabase.table("customers").insert(data).execute()
+    result = _sb().table("customers").insert(data).execute()
     return result.data[0]
 
 @api.put("/customers/{cid}")
 async def update_customer(cid: str, request: Request):
     await get_current_user(request)
     body = await request.json()
-    result = supabase.table("customers").update(body).eq("id", cid).execute()
+    result = _sb().table("customers").update(body).eq("id", cid).execute()
     return result.data[0] if result.data else {}
 
 # ===================== SALES / POS ROUTES =====================
@@ -836,7 +891,7 @@ async def create_sale(req: SaleCreate, request: Request):
     vat_amount = 0.0
     sscl_amount = 0.0
     tax_inclusive = False
-    settings = supabase.table("app_settings").select("key, value").in_("key", ["tax_active", "vat_rate", "sscl_rate"]).execute()
+    settings = _sb().table("app_settings").select("key, value").in_("key", ["tax_active", "vat_rate", "sscl_rate"]).execute()
     settings_dict = {s["key"]: s["value"] for s in settings.data} if settings.data else {}
     tax_active = settings_dict.get("tax_active", "false") == "true"
     if tax_active:
@@ -868,7 +923,7 @@ async def create_sale(req: SaleCreate, request: Request):
         "status": "completed",
         "notes": req.notes
     }
-    sale_result = supabase.table("sales").insert(sale_data).execute()
+    sale_result = _sb().table("sales").insert(sale_data).execute()
     sale = sale_result.data[0]
     for item in req.items:
         item_total = float(item["quantity"]) * float(item["unit_price"]) - float(item.get("discount", 0))
@@ -882,17 +937,17 @@ async def create_sale(req: SaleCreate, request: Request):
             "discount": item.get("discount", 0),
             "total": item_total
         }
-        supabase.table("sale_items").insert(sale_item).execute()
+        _sb().table("sale_items").insert(sale_item).execute()
         if req.location_id:
-            inv = supabase.table("inventory").select("id, quantity").eq("product_id", item["product_id"]).eq("location_id", req.location_id).execute()
+            inv = _sb().table("inventory").select("id, quantity").eq("product_id", item["product_id"]).eq("location_id", req.location_id).execute()
             if inv.data:
                 new_qty = max(0, float(inv.data[0]["quantity"]) - float(item["quantity"]))
-                supabase.table("inventory").update({"quantity": new_qty, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", inv.data[0]["id"]).execute()
-    supabase.table("payments").insert({"sale_id": sale["id"], "method": req.payment_method, "amount": total}).execute()
+                _sb().table("inventory").update({"quantity": new_qty, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", inv.data[0]["id"]).execute()
+    _sb().table("payments").insert({"sale_id": sale["id"], "method": req.payment_method, "amount": total}).execute()
     if req.customer_id:
-        cust = supabase.table("customers").select("total_purchases, loyalty_points").eq("id", req.customer_id).execute()
+        cust = _sb().table("customers").select("total_purchases, loyalty_points").eq("id", req.customer_id).execute()
         if cust.data:
-            supabase.table("customers").update({
+            _sb().table("customers").update({
                 "total_purchases": float(cust.data[0].get("total_purchases", 0)) + total,
                 "loyalty_points": int(cust.data[0].get("loyalty_points", 0)) + int(total // 100)
             }).eq("id", req.customer_id).execute()
@@ -901,7 +956,7 @@ async def create_sale(req: SaleCreate, request: Request):
 @api.get("/sales")
 async def list_sales(request: Request, start_date: Optional[str] = None, end_date: Optional[str] = None, location_id: Optional[str] = None, limit: int = 100, offset: int = 0):
     await get_current_user(request)
-    query = supabase.table("sales").select("*", count="exact")
+    query = _sb().table("sales").select("*", count="exact")
     if start_date:
         query = query.gte("created_at", start_date)
     if end_date:
@@ -914,21 +969,21 @@ async def list_sales(request: Request, start_date: Optional[str] = None, end_dat
 @api.get("/sales/{sale_id}")
 async def get_sale(sale_id: str, request: Request):
     await get_current_user(request)
-    sale = supabase.table("sales").select("*").eq("id", sale_id).execute()
+    sale = _sb().table("sales").select("*").eq("id", sale_id).execute()
     if not sale.data:
         raise HTTPException(status_code=404, detail="Sale not found")
-    items = supabase.table("sale_items").select("*").eq("sale_id", sale_id).execute()
-    payments = supabase.table("payments").select("*").eq("sale_id", sale_id).execute()
+    items = _sb().table("sale_items").select("*").eq("sale_id", sale_id).execute()
+    payments = _sb().table("payments").select("*").eq("sale_id", sale_id).execute()
     return {**sale.data[0], "items": items.data, "payments": payments.data}
 
 @api.get("/sales/{sale_id}/receipt")
 async def get_receipt(sale_id: str, request: Request):
     await get_current_user(request)
-    sale = supabase.table("sales").select("*").eq("id", sale_id).execute()
+    sale = _sb().table("sales").select("*").eq("id", sale_id).execute()
     if not sale.data:
         raise HTTPException(status_code=404, detail="Sale not found")
-    items = supabase.table("sale_items").select("*").eq("sale_id", sale_id).execute()
-    settings = supabase.table("app_settings").select("key, value").execute()
+    items = _sb().table("sale_items").select("*").eq("sale_id", sale_id).execute()
+    settings = _sb().table("app_settings").select("key, value").execute()
     settings_dict = {s["key"]: s["value"] for s in settings.data} if settings.data else {}
     return {
         "sale": sale.data[0],
@@ -944,7 +999,7 @@ async def get_receipt(sale_id: str, request: Request):
 @api.get("/expenses")
 async def list_expenses(request: Request, start_date: Optional[str] = None, end_date: Optional[str] = None):
     await get_current_user(request)
-    query = supabase.table("expenses").select("*")
+    query = _sb().table("expenses").select("*")
     if start_date:
         query = query.gte("expense_date", start_date)
     if end_date:
@@ -958,7 +1013,7 @@ async def create_expense(req: ExpenseCreate, request: Request):
     data = {"category": req.category, "description": req.description, "amount": req.amount, "expense_date": req.expense_date or date.today().isoformat(), "created_by": user["sub"]}
     if req.location_id:
         data["location_id"] = req.location_id
-    result = supabase.table("expenses").insert(data).execute()
+    result = _sb().table("expenses").insert(data).execute()
     return result.data[0]
 
 # ===================== ACCOUNTING ROUTES =====================
@@ -970,7 +1025,7 @@ async def daily_sales_report(request: Request, report_date: Optional[str] = None
     start = f"{target_date}T00:00:00"
     end = f"{target_date}T23:59:59"
     # POS Sales
-    sales = supabase.table("sales").select("*").gte("created_at", start).lte("created_at", end).eq("status", "completed").execute()
+    sales = _sb().table("sales").select("*").gte("created_at", start).lte("created_at", end).eq("status", "completed").execute()
     total_revenue = sum(float(s["total"]) for s in sales.data)
     total_discount = sum(float(s.get("discount_amount", 0)) for s in sales.data)
     total_tax = sum(float(s.get("tax_amount", 0)) for s in sales.data)
@@ -980,20 +1035,20 @@ async def daily_sales_report(request: Request, report_date: Optional[str] = None
         method = s.get("payment_method", "cash")
         payment_breakdown[method] = payment_breakdown.get(method, 0) + float(s["total"])
     # Custom order payments received today
-    co_payments = supabase.table("custom_order_payments").select("amount, payment_method").gte("created_at", start).lte("created_at", end).execute()
+    co_payments = _sb().table("custom_order_payments").select("amount, payment_method").gte("created_at", start).lte("created_at", end).execute()
     co_total = sum(float(p["amount"]) for p in co_payments.data)
     for p in co_payments.data:
         method = p.get("payment_method", "cash")
         payment_breakdown[method] = payment_breakdown.get(method, 0) + float(p["amount"])
     # Manual income
-    manual_income = supabase.table("manual_transactions").select("amount").eq("type", "income").eq("transaction_date", target_date).execute()
+    manual_income = _sb().table("manual_transactions").select("amount").eq("type", "income").eq("transaction_date", target_date).execute()
     manual_income_total = sum(float(m["amount"]) for m in manual_income.data)
     # COGS
     cogs = 0
     for s in sales.data:
-        items = supabase.table("sale_items").select("product_id, quantity").eq("sale_id", s["id"]).execute()
+        items = _sb().table("sale_items").select("product_id, quantity").eq("sale_id", s["id"]).execute()
         for item in items.data:
-            product = supabase.table("products").select("cost_price").eq("id", item["product_id"]).execute()
+            product = _sb().table("products").select("cost_price").eq("id", item["product_id"]).execute()
             if product.data:
                 cogs += float(product.data[0].get("cost_price", 0)) * float(item["quantity"])
     combined_revenue = total_revenue + co_total + manual_income_total
@@ -1020,31 +1075,31 @@ async def income_statement(request: Request, start_date: Optional[str] = None, e
     if not end_date:
         end_date = date.today().isoformat()
     # POS Sales
-    sales = supabase.table("sales").select("id, total, discount_amount, tax_amount").gte("created_at", start_date + "T00:00:00").lte("created_at", end_date + "T23:59:59").eq("status", "completed").execute()
+    sales = _sb().table("sales").select("id, total, discount_amount, tax_amount").gte("created_at", start_date + "T00:00:00").lte("created_at", end_date + "T23:59:59").eq("status", "completed").execute()
     pos_revenue = sum(float(s["total"]) for s in sales.data)
     # Manual income
-    manual_inc = supabase.table("manual_transactions").select("category, amount").eq("type", "income").gte("transaction_date", start_date).lte("transaction_date", end_date).execute()
+    manual_inc = _sb().table("manual_transactions").select("category, amount").eq("type", "income").gte("transaction_date", start_date).lte("transaction_date", end_date).execute()
     manual_income_total = sum(float(m["amount"]) for m in manual_inc.data)
     manual_income_by_cat = {}
     for m in manual_inc.data:
         manual_income_by_cat[m["category"]] = manual_income_by_cat.get(m["category"], 0) + float(m["amount"])
     # Custom order payments (only for delivered orders = earned revenue, plus advance = unearned)
-    co_payments = supabase.table("custom_order_payments").select("amount").gte("created_at", start_date + "T00:00:00").lte("created_at", end_date + "T23:59:59").execute()
+    co_payments = _sb().table("custom_order_payments").select("amount").gte("created_at", start_date + "T00:00:00").lte("created_at", end_date + "T23:59:59").execute()
     co_revenue = sum(float(p["amount"]) for p in co_payments.data)
     revenue = pos_revenue + manual_income_total + co_revenue
     # COGS
     cogs = 0
     for s in sales.data:
-        items = supabase.table("sale_items").select("product_id, quantity").eq("sale_id", s["id"]).execute()
+        items = _sb().table("sale_items").select("product_id, quantity").eq("sale_id", s["id"]).execute()
         for item in items.data:
-            product = supabase.table("products").select("cost_price").eq("id", item["product_id"]).execute()
+            product = _sb().table("products").select("cost_price").eq("id", item["product_id"]).execute()
             if product.data:
                 cogs += float(product.data[0].get("cost_price", 0)) * float(item["quantity"])
     # Manual expenses
-    manual_exp = supabase.table("manual_transactions").select("category, amount").eq("type", "expense").gte("transaction_date", start_date).lte("transaction_date", end_date).execute()
+    manual_exp = _sb().table("manual_transactions").select("category, amount").eq("type", "expense").gte("transaction_date", start_date).lte("transaction_date", end_date).execute()
     manual_expense_total = sum(float(e["amount"]) for e in manual_exp.data)
     # Legacy expenses table
-    expenses = supabase.table("expenses").select("category, amount").gte("expense_date", start_date).lte("expense_date", end_date).execute()
+    expenses = _sb().table("expenses").select("category, amount").gte("expense_date", start_date).lte("expense_date", end_date).execute()
     legacy_expense_total = sum(float(e["amount"]) for e in expenses.data)
     total_expenses = manual_expense_total + legacy_expense_total
     expense_by_category = {}
@@ -1075,26 +1130,26 @@ async def income_statement(request: Request, start_date: Optional[str] = None, e
 @api.get("/accounting/balance-sheet")
 async def balance_sheet(request: Request):
     await get_current_user(request)
-    inventory_result = supabase.table("inventory").select("quantity, products(cost_price)").execute()
+    inventory_result = _sb().table("inventory").select("quantity, products(cost_price)").execute()
     inventory_value = sum(float(i["quantity"]) * float(i["products"]["cost_price"]) for i in inventory_result.data if i.get("products"))
-    rm_result = supabase.table("raw_materials").select("quantity, unit_cost").execute()
+    rm_result = _sb().table("raw_materials").select("quantity, unit_cost").execute()
     rm_value = sum(float(r["quantity"]) * float(r["unit_cost"]) for r in rm_result.data)
-    sales_total = supabase.table("sales").select("total").eq("status", "completed").execute()
+    sales_total = _sb().table("sales").select("total").eq("status", "completed").execute()
     total_revenue = sum(float(s["total"]) for s in sales_total.data)
     # Manual income
-    manual_inc = supabase.table("manual_transactions").select("amount").eq("type", "income").execute()
+    manual_inc = _sb().table("manual_transactions").select("amount").eq("type", "income").execute()
     total_manual_income = sum(float(m["amount"]) for m in manual_inc.data)
     # Custom order payments received
-    co_payments = supabase.table("custom_order_payments").select("amount").execute()
+    co_payments = _sb().table("custom_order_payments").select("amount").execute()
     total_co_payments = sum(float(p["amount"]) for p in co_payments.data)
     # Unearned revenue (advance payments for non-delivered orders)
-    undelivered = supabase.table("custom_orders").select("amount_paid").in_("status", ["order_taken", "in_progress", "ready_for_pickup"]).execute()
+    undelivered = _sb().table("custom_orders").select("amount_paid").in_("status", ["order_taken", "in_progress", "ready_for_pickup"]).execute()
     unearned_revenue = sum(float(o["amount_paid"]) for o in undelivered.data)
-    po_total = supabase.table("purchase_orders").select("total_amount").eq("status", "received").execute()
+    po_total = _sb().table("purchase_orders").select("total_amount").eq("status", "received").execute()
     total_purchases = sum(float(p["total_amount"]) for p in po_total.data)
-    expenses_total = supabase.table("expenses").select("amount").execute()
+    expenses_total = _sb().table("expenses").select("amount").execute()
     total_expenses = sum(float(e["amount"]) for e in expenses_total.data)
-    manual_exp = supabase.table("manual_transactions").select("amount").eq("type", "expense").execute()
+    manual_exp = _sb().table("manual_transactions").select("amount").eq("type", "expense").execute()
     total_manual_expenses = sum(float(e["amount"]) for e in manual_exp.data)
     all_expenses = total_expenses + total_manual_expenses
     all_income = total_revenue + total_manual_income + total_co_payments
@@ -1130,13 +1185,13 @@ async def dashboard_stats(request: Request):
     today = date.today().isoformat()
     today_start = f"{today}T00:00:00"
     today_end = f"{today}T23:59:59"
-    today_sales = supabase.table("sales").select("total").gte("created_at", today_start).lte("created_at", today_end).eq("status", "completed").execute()
+    today_sales = _sb().table("sales").select("total").gte("created_at", today_start).lte("created_at", today_end).eq("status", "completed").execute()
     today_revenue = sum(float(s["total"]) for s in today_sales.data)
-    products_count = supabase.table("products").select("id", count="exact").eq("is_active", True).execute()
-    low_stock = supabase.table("inventory").select("id", count="exact").lt("quantity", 10).execute()
-    pending_orders = supabase.table("production_orders").select("id", count="exact").in_("status", ["planned", "in_progress"]).execute()
-    pending_po = supabase.table("purchase_orders").select("id", count="exact").in_("status", ["draft", "ordered"]).execute()
-    active_custom = supabase.table("custom_orders").select("id", count="exact").in_("status", ["order_taken", "in_progress", "ready_for_pickup"]).execute()
+    products_count = _sb().table("products").select("id", count="exact").eq("is_active", True).execute()
+    low_stock = _sb().table("inventory").select("id", count="exact").lt("quantity", 10).execute()
+    pending_orders = _sb().table("production_orders").select("id", count="exact").in_("status", ["planned", "in_progress"]).execute()
+    pending_po = _sb().table("purchase_orders").select("id", count="exact").in_("status", ["draft", "ordered"]).execute()
+    active_custom = _sb().table("custom_orders").select("id", count="exact").in_("status", ["order_taken", "in_progress", "ready_for_pickup"]).execute()
     return {
         "today_revenue": round(today_revenue, 2),
         "today_transactions": len(today_sales.data),
@@ -1152,17 +1207,17 @@ async def dashboard_stats(request: Request):
 @api.get("/settings")
 async def get_settings(request: Request):
     await get_current_user(request)
-    result = supabase.table("app_settings").select("key, value").execute()
+    result = _sb().table("app_settings").select("key, value").execute()
     return {s["key"]: s["value"] for s in result.data} if result.data else {}
 
 @api.put("/settings")
 async def update_setting(req: SettingUpdate, request: Request):
     await require_role("admin")(request)
-    existing = supabase.table("app_settings").select("id").eq("key", req.key).execute()
+    existing = _sb().table("app_settings").select("id").eq("key", req.key).execute()
     if existing.data:
-        supabase.table("app_settings").update({"value": req.value, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("key", req.key).execute()
+        _sb().table("app_settings").update({"value": req.value, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("key", req.key).execute()
     else:
-        supabase.table("app_settings").insert({"key": req.key, "value": req.value}).execute()
+        _sb().table("app_settings").insert({"key": req.key, "value": req.value}).execute()
     return {"message": "Setting updated"}
 
 # ===================== MANUAL TRANSACTIONS =====================
@@ -1170,7 +1225,7 @@ async def update_setting(req: SettingUpdate, request: Request):
 @api.get("/manual-transactions")
 async def list_manual_transactions(request: Request, type: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, limit: int = 100, offset: int = 0):
     await get_current_user(request)
-    query = supabase.table("manual_transactions").select("*", count="exact")
+    query = _sb().table("manual_transactions").select("*", count="exact")
     if type:
         query = query.eq("type", type)
     if start_date:
@@ -1190,13 +1245,13 @@ async def create_manual_transaction(req: ManualTransactionCreate, request: Reque
     }
     if req.location_id:
         data["location_id"] = req.location_id
-    result = supabase.table("manual_transactions").insert(data).execute()
+    result = _sb().table("manual_transactions").insert(data).execute()
     return result.data[0]
 
 @api.delete("/manual-transactions/{tid}")
 async def delete_manual_transaction(tid: str, request: Request):
     await get_current_user(request)
-    supabase.table("manual_transactions").delete().eq("id", tid).execute()
+    _sb().table("manual_transactions").delete().eq("id", tid).execute()
     return {"message": "Deleted"}
 
 # ===================== TRANSACTION CATEGORIES =====================
@@ -1204,7 +1259,7 @@ async def delete_manual_transaction(tid: str, request: Request):
 @api.get("/transaction-categories")
 async def list_transaction_categories(request: Request, type: Optional[str] = None):
     await get_current_user(request)
-    query = supabase.table("transaction_categories").select("*")
+    query = _sb().table("transaction_categories").select("*")
     if type:
         query = query.eq("type", type)
     result = query.order("name").execute()
@@ -1214,13 +1269,13 @@ async def list_transaction_categories(request: Request, type: Optional[str] = No
 async def create_transaction_category(req: TransactionCategoryCreate, request: Request):
     await get_current_user(request)
     data = {"name": req.name, "type": req.type, "is_default": False}
-    result = supabase.table("transaction_categories").insert(data).execute()
+    result = _sb().table("transaction_categories").insert(data).execute()
     return result.data[0]
 
 @api.delete("/transaction-categories/{cid}")
 async def delete_transaction_category(cid: str, request: Request):
     await get_current_user(request)
-    supabase.table("transaction_categories").delete().eq("id", cid).execute()
+    _sb().table("transaction_categories").delete().eq("id", cid).execute()
     return {"message": "Deleted"}
 
 # ===================== LOGO UPLOAD =====================
@@ -1234,11 +1289,11 @@ async def upload_logo(request: Request, file: UploadFile = File(...)):
     b64 = base64.b64encode(contents).decode("utf-8")
     content_type = file.content_type or "image/png"
     data_url = f"data:{content_type};base64,{b64}"
-    existing = supabase.table("app_settings").select("id").eq("key", "logo_url").execute()
+    existing = _sb().table("app_settings").select("id").eq("key", "logo_url").execute()
     if existing.data:
-        supabase.table("app_settings").update({"value": data_url, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("key", "logo_url").execute()
+        _sb().table("app_settings").update({"value": data_url, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("key", "logo_url").execute()
     else:
-        supabase.table("app_settings").insert({"key": "logo_url", "value": data_url}).execute()
+        _sb().table("app_settings").insert({"key": "logo_url", "value": data_url}).execute()
     invalidate_cache("settings")
     return {"logo_url": data_url}
 
@@ -1247,19 +1302,19 @@ async def upload_logo(request: Request, file: UploadFile = File(...)):
 @api.get("/product-attributes")
 async def list_product_attributes(request: Request):
     await get_current_user(request)
-    result = supabase.table("product_attributes").select("*").order("name").execute()
+    result = _sb().table("product_attributes").select("*").order("name").execute()
     return result.data
 
 @api.post("/product-attributes")
 async def create_product_attribute(req: ProductAttributeCreate, request: Request):
     await require_role("admin")(request)
-    result = supabase.table("product_attributes").insert({"name": req.name}).execute()
+    result = _sb().table("product_attributes").insert({"name": req.name}).execute()
     return result.data[0]
 
 @api.delete("/product-attributes/{attr_id}")
 async def delete_product_attribute(attr_id: str, request: Request):
     await require_role("admin")(request)
-    supabase.table("product_attributes").delete().eq("id", attr_id).execute()
+    _sb().table("product_attributes").delete().eq("id", attr_id).execute()
     return {"message": "Attribute deleted"}
 
 # ===================== PRODUCT VARIANTS =====================
@@ -1267,42 +1322,42 @@ async def delete_product_attribute(attr_id: str, request: Request):
 @api.get("/product-variants")
 async def list_product_variants(request: Request, product_id: Optional[str] = None):
     await get_current_user(request)
-    query = supabase.table("product_variants").select("*, products(name, sku)").eq("is_active", True)
+    query = _sb().table("product_variants").select("*, products(name, sku)").eq("is_active", True)
     if product_id:
         query = query.eq("product_id", product_id)
     result = query.order("created_at", desc=True).execute()
     # Enrich with attribute values
     for variant in result.data:
-        attrs = supabase.table("product_variant_attributes").select("*, product_attributes(name)").eq("variant_id", variant["id"]).execute()
+        attrs = _sb().table("product_variant_attributes").select("*, product_attributes(name)").eq("variant_id", variant["id"]).execute()
         variant["attributes"] = attrs.data
     return result.data
 
 @api.post("/product-variants")
 async def create_product_variant(req: ProductVariantCreate, request: Request):
     await get_current_user(request)
-    product = supabase.table("products").select("sku").eq("id", req.product_id).execute()
+    product = _sb().table("products").select("sku").eq("id", req.product_id).execute()
     variant_sku = req.variant_sku
     if not variant_sku and product.data:
         attr_suffix = "-".join(a.get("value", "")[:3].upper() for a in req.attributes)
         variant_sku = f"{product.data[0]['sku']}-{attr_suffix}" if attr_suffix else f"{product.data[0]['sku']}-V{str(uuid.uuid4())[:4].upper()}"
     variant_data = {"product_id": req.product_id, "variant_sku": variant_sku, "is_active": True}
-    result = supabase.table("product_variants").insert(variant_data).execute()
+    result = _sb().table("product_variants").insert(variant_data).execute()
     variant = result.data[0]
     for attr in req.attributes:
-        supabase.table("product_variant_attributes").insert({
+        _sb().table("product_variant_attributes").insert({
             "variant_id": variant["id"],
             "attribute_id": attr["attribute_id"],
             "value": attr["value"]
         }).execute()
     # Return with attributes
-    attrs = supabase.table("product_variant_attributes").select("*, product_attributes(name)").eq("variant_id", variant["id"]).execute()
+    attrs = _sb().table("product_variant_attributes").select("*, product_attributes(name)").eq("variant_id", variant["id"]).execute()
     variant["attributes"] = attrs.data
     return variant
 
 @api.delete("/product-variants/{variant_id}")
 async def delete_product_variant(variant_id: str, request: Request):
     await get_current_user(request)
-    supabase.table("product_variants").update({"is_active": False}).eq("id", variant_id).execute()
+    _sb().table("product_variants").update({"is_active": False}).eq("id", variant_id).execute()
     return {"message": "Variant deactivated"}
 
 # ===================== TAX SETTINGS =====================
@@ -1310,7 +1365,7 @@ async def delete_product_variant(variant_id: str, request: Request):
 @api.get("/tax-settings")
 async def get_tax_settings(request: Request):
     await get_current_user(request)
-    result = supabase.table("app_settings").select("key, value").in_("key", ["tax_active", "vat_rate", "sscl_rate"]).execute()
+    result = _sb().table("app_settings").select("key, value").in_("key", ["tax_active", "vat_rate", "sscl_rate"]).execute()
     settings = {s["key"]: s["value"] for s in result.data} if result.data else {}
     return {
         "tax_active": settings.get("tax_active", "false") == "true",
@@ -1325,11 +1380,11 @@ async def update_tax_settings(request: Request):
     for key in ["tax_active", "vat_rate", "sscl_rate"]:
         if key in body:
             value = str(body[key]).lower() if key == "tax_active" else str(body[key])
-            existing = supabase.table("app_settings").select("id").eq("key", key).execute()
+            existing = _sb().table("app_settings").select("id").eq("key", key).execute()
             if existing.data:
-                supabase.table("app_settings").update({"value": value}).eq("key", key).execute()
+                _sb().table("app_settings").update({"value": value}).eq("key", key).execute()
             else:
-                supabase.table("app_settings").insert({"key": key, "value": value}).execute()
+                _sb().table("app_settings").insert({"key": key, "value": value}).execute()
     return {"message": "Tax settings updated"}
 
 # ===================== SHIFT RECONCILIATION =====================
@@ -1337,7 +1392,7 @@ async def update_tax_settings(request: Request):
 @api.get("/shifts")
 async def list_shifts(request: Request, location_id: Optional[str] = None, status: Optional[str] = None, limit: int = 50, offset: int = 0):
     await get_current_user(request)
-    query = supabase.table("shift_records").select("*, locations(name)", count="exact")
+    query = _sb().table("shift_records").select("*, locations(name)", count="exact")
     if location_id:
         query = query.eq("location_id", location_id)
     if status:
@@ -1349,7 +1404,7 @@ async def list_shifts(request: Request, location_id: Optional[str] = None, statu
 async def open_shift(req: ShiftOpenCreate, request: Request):
     user = await get_current_user(request)
     # Check for existing open shift at this location
-    existing = supabase.table("shift_records").select("id").eq("location_id", req.location_id).eq("status", "open").execute()
+    existing = _sb().table("shift_records").select("id").eq("location_id", req.location_id).eq("status", "open").execute()
     if existing.data:
         raise HTTPException(status_code=400, detail="An open shift already exists at this location. Close it first.")
     shift_data = {
@@ -1360,32 +1415,32 @@ async def open_shift(req: ShiftOpenCreate, request: Request):
         "opening_float": req.opening_float,
         "status": "open"
     }
-    result = supabase.table("shift_records").insert(shift_data).execute()
+    result = _sb().table("shift_records").insert(shift_data).execute()
     return result.data[0]
 
 @api.get("/shifts/{shift_id}")
 async def get_shift(shift_id: str, request: Request):
     await get_current_user(request)
-    shift = supabase.table("shift_records").select("*, locations(name)").eq("id", shift_id).execute()
+    shift = _sb().table("shift_records").select("*, locations(name)").eq("id", shift_id).execute()
     if not shift.data:
         raise HTTPException(status_code=404, detail="Shift not found")
-    petty = supabase.table("petty_cash").select("*").eq("shift_id", shift_id).order("created_at", desc=True).execute()
+    petty = _sb().table("petty_cash").select("*").eq("shift_id", shift_id).order("created_at", desc=True).execute()
     return {**shift.data[0], "petty_cash": petty.data}
 
 @api.get("/shifts/current/{location_id}")
 async def get_current_shift(location_id: str, request: Request):
     await get_current_user(request)
-    result = supabase.table("shift_records").select("*, locations(name)").eq("location_id", location_id).eq("status", "open").execute()
+    result = _sb().table("shift_records").select("*, locations(name)").eq("location_id", location_id).eq("status", "open").execute()
     if not result.data:
         return None
     shift = result.data[0]
     # Calculate live totals
     shift_start = shift["created_at"]
-    sales = supabase.table("sales").select("total, payment_method").eq("location_id", location_id).gte("created_at", shift_start).eq("status", "completed").execute()
+    sales = _sb().table("sales").select("total, payment_method").eq("location_id", location_id).gte("created_at", shift_start).eq("status", "completed").execute()
     cash_sales = sum(float(s["total"]) for s in sales.data if s["payment_method"] == "cash")
     card_sales = sum(float(s["total"]) for s in sales.data if s["payment_method"] == "card")
     transfer_sales = sum(float(s["total"]) for s in sales.data if s["payment_method"] == "bank_transfer")
-    petty = supabase.table("petty_cash").select("type, amount").eq("shift_id", shift["id"]).execute()
+    petty = _sb().table("petty_cash").select("type, amount").eq("shift_id", shift["id"]).execute()
     petty_income = sum(float(p["amount"]) for p in petty.data if p["type"] == "income")
     petty_expense = sum(float(p["amount"]) for p in petty.data if p["type"] == "expense")
     opening = float(shift.get("opening_float", 0))
@@ -1401,18 +1456,18 @@ async def get_current_shift(location_id: str, request: Request):
 @api.post("/shifts/{shift_id}/close")
 async def close_shift(shift_id: str, req: ShiftCloseCreate, request: Request):
     await get_current_user(request)
-    shift = supabase.table("shift_records").select("*").eq("id", shift_id).eq("status", "open").execute()
+    shift = _sb().table("shift_records").select("*").eq("id", shift_id).eq("status", "open").execute()
     if not shift.data:
         raise HTTPException(status_code=404, detail="Open shift not found")
     s = shift.data[0]
     location_id = s["location_id"]
     shift_start = s["created_at"]
     # Calculate totals
-    sales = supabase.table("sales").select("total, payment_method").eq("location_id", location_id).gte("created_at", shift_start).eq("status", "completed").execute()
+    sales = _sb().table("sales").select("total, payment_method").eq("location_id", location_id).gte("created_at", shift_start).eq("status", "completed").execute()
     cash_sales = sum(float(sl["total"]) for sl in sales.data if sl["payment_method"] == "cash")
     card_sales = sum(float(sl["total"]) for sl in sales.data if sl["payment_method"] == "card")
     transfer_sales = sum(float(sl["total"]) for sl in sales.data if sl["payment_method"] == "bank_transfer")
-    petty = supabase.table("petty_cash").select("type, amount").eq("shift_id", shift_id).execute()
+    petty = _sb().table("petty_cash").select("type, amount").eq("shift_id", shift_id).execute()
     petty_income = sum(float(p["amount"]) for p in petty.data if p["type"] == "income")
     petty_expense = sum(float(p["amount"]) for p in petty.data if p["type"] == "expense")
     opening = float(s.get("opening_float", 0))
@@ -1431,7 +1486,7 @@ async def close_shift(shift_id: str, req: ShiftCloseCreate, request: Request):
         "notes": req.notes,
         "closed_at": datetime.now(timezone.utc).isoformat()
     }
-    result = supabase.table("shift_records").update(update_data).eq("id", shift_id).execute()
+    result = _sb().table("shift_records").update(update_data).eq("id", shift_id).execute()
     return result.data[0] if result.data else {}
 
 # ===================== PETTY CASH =====================
@@ -1439,7 +1494,7 @@ async def close_shift(shift_id: str, req: ShiftCloseCreate, request: Request):
 @api.get("/petty-cash")
 async def list_petty_cash(request: Request, location_id: Optional[str] = None, shift_id: Optional[str] = None):
     await get_current_user(request)
-    query = supabase.table("petty_cash").select("*, locations(name)")
+    query = _sb().table("petty_cash").select("*, locations(name)")
     if location_id:
         query = query.eq("location_id", location_id)
     if shift_id:
@@ -1459,7 +1514,7 @@ async def create_petty_cash(req: PettyCashCreate, request: Request):
         "shift_id": req.shift_id,
         "created_by": user["sub"]
     }
-    result = supabase.table("petty_cash").insert(data).execute()
+    result = _sb().table("petty_cash").insert(data).execute()
     return result.data[0]
 
 # ===================== DASHBOARD ANALYTICS =====================
@@ -1477,7 +1532,7 @@ async def dashboard_analytics(request: Request, location_id: Optional[str] = Non
     end_date = date.today()
     start_date = end_date - timedelta(days=days - 1)
     # Sales trend data
-    sales_query = supabase.table("sales").select("id, total, subtotal, discount_amount, tax_amount, vat_amount, sscl_amount, payment_method, location_id, created_at").gte("created_at", f"{start_date}T00:00:00").lte("created_at", f"{end_date}T23:59:59").eq("status", "completed")
+    sales_query = _sb().table("sales").select("id, total, subtotal, discount_amount, tax_amount, vat_amount, sscl_amount, payment_method, location_id, created_at").gte("created_at", f"{start_date}T00:00:00").lte("created_at", f"{end_date}T23:59:59").eq("status", "completed")
     if location_id:
         sales_query = sales_query.eq("location_id", location_id)
     sales = sales_query.execute()
@@ -1516,7 +1571,7 @@ async def dashboard_analytics(request: Request, location_id: Optional[str] = Non
     top_products = {}
     if sale_ids:
         for sid in sale_ids[:50]:  # Limit to avoid too many queries
-            items = supabase.table("sale_items").select("product_name, quantity, total").eq("sale_id", sid).execute()
+            items = _sb().table("sale_items").select("product_name, quantity, total").eq("sale_id", sid).execute()
             for item in items.data:
                 name = item["product_name"]
                 if name not in top_products:
@@ -1525,13 +1580,13 @@ async def dashboard_analytics(request: Request, location_id: Optional[str] = Non
                 top_products[name]["revenue"] += float(item["total"])
     top_sorted = sorted(top_products.values(), key=lambda x: x["revenue"], reverse=True)[:10]
     # Expenses by location
-    expenses_query = supabase.table("expenses").select("amount, category, location_id").gte("expense_date", start_date.isoformat()).lte("expense_date", end_date.isoformat())
+    expenses_query = _sb().table("expenses").select("amount, category, location_id").gte("expense_date", start_date.isoformat()).lte("expense_date", end_date.isoformat())
     if location_id:
         expenses_query = expenses_query.eq("location_id", location_id)
     expenses = expenses_query.execute()
     total_expenses = sum(float(e["amount"]) for e in expenses.data)
     # Petty cash expenses
-    petty_query = supabase.table("petty_cash").select("amount, type, location_id").eq("type", "expense").gte("created_at", f"{start_date}T00:00:00").lte("created_at", f"{end_date}T23:59:59")
+    petty_query = _sb().table("petty_cash").select("amount, type, location_id").eq("type", "expense").gte("created_at", f"{start_date}T00:00:00").lte("created_at", f"{end_date}T23:59:59")
     if location_id:
         petty_query = petty_query.eq("location_id", location_id)
     petty_expenses = petty_query.execute()
@@ -1540,9 +1595,9 @@ async def dashboard_analytics(request: Request, location_id: Optional[str] = Non
     # COGS
     cogs = 0
     for s in sales.data[:50]:
-        items = supabase.table("sale_items").select("product_id, quantity").eq("sale_id", s["id"]).execute()
+        items = _sb().table("sale_items").select("product_id, quantity").eq("sale_id", s["id"]).execute()
         for item in items.data:
-            prod = supabase.table("products").select("cost_price").eq("id", item["product_id"]).execute()
+            prod = _sb().table("products").select("cost_price").eq("id", item["product_id"]).execute()
             if prod.data:
                 cogs += float(prod.data[0].get("cost_price", 0)) * float(item["quantity"])
     net_profit = total_revenue - cogs - total_expenses - total_petty_expenses
@@ -1565,7 +1620,7 @@ async def dashboard_analytics(request: Request, location_id: Optional[str] = Non
 async def get_migration_status(request: Request):
     await require_role("admin")(request)
     try:
-        result = supabase.table("_migrations").select("*").order("version").execute()
+        result = _sb().table("_migrations").select("*").order("version").execute()
         return {"migrations": result.data}
     except Exception:
         return {"migrations": [], "error": "Migration table not found"}
@@ -1575,7 +1630,7 @@ async def get_migration_status(request: Request):
 @api.get("/custom-orders")
 async def list_custom_orders(request: Request, status: Optional[str] = None, limit: int = 100, offset: int = 0):
     await get_current_user(request)
-    query = supabase.table("custom_orders").select("*", count="exact")
+    query = _sb().table("custom_orders").select("*", count="exact")
     if status:
         query = query.eq("status", status)
     result = query.order("created_at", desc=True).range(offset, offset + limit - 1).execute()
@@ -1584,11 +1639,11 @@ async def list_custom_orders(request: Request, status: Optional[str] = None, lim
 @api.get("/custom-orders/{order_id}")
 async def get_custom_order(order_id: str, request: Request):
     await get_current_user(request)
-    order = supabase.table("custom_orders").select("*").eq("id", order_id).execute()
+    order = _sb().table("custom_orders").select("*").eq("id", order_id).execute()
     if not order.data:
         raise HTTPException(status_code=404, detail="Order not found")
-    items = supabase.table("custom_order_items").select("*").eq("custom_order_id", order_id).execute()
-    payments = supabase.table("custom_order_payments").select("*").eq("custom_order_id", order_id).order("created_at", desc=True).execute()
+    items = _sb().table("custom_order_items").select("*").eq("custom_order_id", order_id).execute()
+    payments = _sb().table("custom_order_payments").select("*").eq("custom_order_id", order_id).order("created_at", desc=True).execute()
     return {**order.data[0], "items": items.data, "payments": payments.data}
 
 @api.post("/custom-orders")
@@ -1605,10 +1660,10 @@ async def create_custom_order(req: CustomOrderCreate, request: Request):
         "estimated_date": req.estimated_date, "notes": req.notes,
         "created_by": user["sub"]
     }
-    result = supabase.table("custom_orders").insert(order_data).execute()
+    result = _sb().table("custom_orders").insert(order_data).execute()
     order = result.data[0]
     for item in req.items:
-        supabase.table("custom_order_items").insert({
+        _sb().table("custom_order_items").insert({
             "custom_order_id": order["id"], "item_type": item.get("item_type", "service"),
             "product_id": item.get("product_id"), "product_name": item.get("product_name", ""),
             "description": item.get("description", ""), "quantity": float(item.get("quantity", 1)),
@@ -1616,7 +1671,7 @@ async def create_custom_order(req: CustomOrderCreate, request: Request):
             "total": float(item.get("quantity", 1)) * float(item.get("unit_price", 0))
         }).execute()
     if req.advance_payment > 0:
-        supabase.table("custom_order_payments").insert({
+        _sb().table("custom_order_payments").insert({
             "custom_order_id": order["id"], "amount": req.advance_payment,
             "payment_method": req.payment_method, "payment_type": "advance"
         }).execute()
@@ -1632,12 +1687,12 @@ async def update_custom_order_status(order_id: str, request: Request):
     update_data = {"status": new_status}
     if new_status == "delivered":
         update_data["delivery_date"] = datetime.now(timezone.utc).isoformat()
-    supabase.table("custom_orders").update(update_data).eq("id", order_id).execute()
+    _sb().table("custom_orders").update(update_data).eq("id", order_id).execute()
     # Send SMS notification if ready_for_pickup
     if new_status == "ready_for_pickup":
-        order = supabase.table("custom_orders").select("customer_mobile, customer_name, order_number").eq("id", order_id).execute()
+        order = _sb().table("custom_orders").select("customer_mobile, customer_name, order_number").eq("id", order_id).execute()
         if order.data and order.data[0].get("customer_mobile"):
-            settings = supabase.table("app_settings").select("key, value").in_("key", ["sms_api_key", "sms_sender_id", "business_name"]).execute()
+            settings = _sb().table("app_settings").select("key, value").in_("key", ["sms_api_key", "sms_sender_id", "business_name"]).execute()
             settings_dict = {s["key"]: s["value"] for s in settings.data} if settings.data else {}
             if settings_dict.get("sms_api_key"):
                 logger.info(f"SMS notification: Order {order.data[0]['order_number']} ready for pickup - {order.data[0]['customer_mobile']}")
@@ -1646,37 +1701,234 @@ async def update_custom_order_status(order_id: str, request: Request):
 @api.post("/custom-orders/{order_id}/payment")
 async def add_custom_order_payment(order_id: str, req: CustomOrderPaymentCreate, request: Request):
     await get_current_user(request)
-    order = supabase.table("custom_orders").select("amount_paid, balance_due, total_amount, status").eq("id", order_id).execute()
+    order = _sb().table("custom_orders").select("amount_paid, balance_due, total_amount, status").eq("id", order_id).execute()
     if not order.data:
         raise HTTPException(status_code=404, detail="Order not found")
     o = order.data[0]
     new_paid = float(o["amount_paid"]) + req.amount
     new_balance = float(o["total_amount"]) - new_paid
-    supabase.table("custom_order_payments").insert({
+    _sb().table("custom_order_payments").insert({
         "custom_order_id": order_id, "amount": req.amount,
         "payment_method": req.payment_method, "payment_type": req.payment_type,
         "reference": req.reference
     }).execute()
-    supabase.table("custom_orders").update({"amount_paid": new_paid, "balance_due": max(0, new_balance)}).eq("id", order_id).execute()
+    _sb().table("custom_orders").update({"amount_paid": new_paid, "balance_due": max(0, new_balance)}).eq("id", order_id).execute()
     return {"message": "Payment recorded", "amount_paid": new_paid, "balance_due": max(0, new_balance)}
 
 # ===================== SETUP / HEALTH =====================
 
 @api.get("/health")
 async def health_check():
+    if not is_configured():
+        return {"status": "not_configured", "database": "not_connected"}
     try:
-        supabase.table("users").select("id", count="exact").limit(1).execute()
+        _sb().table("users").select("id", count="exact").limit(1).execute()
         return {"status": "healthy", "database": "connected"}
     except Exception as e:
         return {"status": "unhealthy", "database": "disconnected", "error": str(e)}
 
+@api.get("/setup/status")
+async def setup_status():
+    """Check if app is fully configured. Used by frontend to decide whether to show wizard."""
+    configured = is_setup_complete()
+    db_ready = False
+    has_admin = False
+    business_name = ""
+    if configured:
+        try:
+            _sb().table("users").select("id", count="exact").limit(1).execute()
+            db_ready = True
+            admins = _sb().table("users").select("id").eq("role", "admin").limit(1).execute()
+            has_admin = bool(admins.data)
+            settings = _sb().table("app_settings").select("value").eq("key", "business_name").execute()
+            if settings.data:
+                business_name = settings.data[0]["value"]
+        except Exception:
+            pass
+    return {
+        "configured": configured,
+        "database_ready": db_ready,
+        "has_admin": has_admin,
+        "business_name": business_name,
+        "setup_complete": configured and db_ready and has_admin
+    }
+
+@api.post("/setup/initialize")
+async def setup_initialize(request: Request):
+    """First-time setup: configure Supabase, create exec_sql, run migrations, write .env."""
+    if is_setup_complete():
+        raise HTTPException(status_code=403, detail="Setup already completed. Cannot re-run.")
+    body = await request.json()
+    supabase_url = body.get("supabase_url", "").strip()
+    supabase_key = body.get("supabase_key", "").strip()
+    service_role_key = body.get("service_role_key", "").strip()
+    db_password = body.get("db_password", "").strip()
+    business_name = body.get("business_name", "").strip()
+    if not all([supabase_url, supabase_key, business_name]):
+        raise HTTPException(status_code=400, detail="supabase_url, supabase_key, and business_name are required.")
+    # Extract project ref from URL
+    match = re.search(r'https://([a-z]+)\.supabase\.co', supabase_url)
+    if not match:
+        raise HTTPException(status_code=400, detail="Invalid Supabase URL format. Expected: https://xxxxx.supabase.co")
+    project_ref = match.group(1)
+    # Step 1: Test Supabase connection
+    try:
+        from supabase import create_client
+        test_client = create_client(supabase_url, supabase_key)
+        test_client.table("_migrations").select("id", count="exact").limit(1).execute()
+        logger.info("Supabase connection test: OK (tables exist)")
+    except Exception as e:
+        logger.info(f"Supabase connection test: tables may not exist yet ({str(e)[:80]})")
+    # Step 2: Create exec_sql helper function
+    # Try direct PostgreSQL connection first
+    exec_sql_created = False
+    db_url = ""
+    if db_password:
+        db_url = f"postgresql://postgres:{db_password}@db.{project_ref}.supabase.co:5432/postgres"
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE OR REPLACE FUNCTION exec_sql(sql_text TEXT)
+                RETURNS void AS $$ BEGIN EXECUTE sql_text; END; $$ LANGUAGE plpgsql SECURITY DEFINER;
+            """)
+            conn.commit()
+            cursor.close()
+            conn.close()
+            exec_sql_created = True
+            logger.info("exec_sql function created via direct PostgreSQL.")
+        except Exception as e1:
+            logger.info(f"Direct PG failed ({str(e1)[:60]}), trying pooler...")
+            # Try pooler regions
+            for region in ['ap-south-1', 'ap-southeast-1', 'us-east-1', 'eu-central-1', 'us-west-1', 'eu-west-1']:
+                pooler_url = f"postgresql://postgres.{project_ref}:{db_password}@aws-0-{region}.pooler.supabase.com:5432/postgres?sslmode=require"
+                try:
+                    conn = psycopg2.connect(pooler_url, connect_timeout=5)
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        CREATE OR REPLACE FUNCTION exec_sql(sql_text TEXT)
+                        RETURNS void AS $$ BEGIN EXECUTE sql_text; END; $$ LANGUAGE plpgsql SECURITY DEFINER;
+                    """)
+                    conn.commit()
+                    cursor.close()
+                    conn.close()
+                    exec_sql_created = True
+                    db_url = pooler_url
+                    logger.info(f"exec_sql function created via pooler ({region}).")
+                    break
+                except Exception:
+                    continue
+    # Step 3: Verify exec_sql exists (it might have been pre-created)
+    if not exec_sql_created:
+        try:
+            from supabase import create_client
+            tc = create_client(supabase_url, service_role_key or supabase_key)
+            tc.rpc("exec_sql", {"sql_text": "SELECT 1"}).execute()
+            exec_sql_created = True
+            logger.info("exec_sql function already exists (verified via RPC).")
+        except Exception:
+            pass
+    if not exec_sql_created:
+        return {
+            "success": False,
+            "step": "exec_sql",
+            "message": "Could not create the database helper function automatically. Please run this SQL in your Supabase SQL Editor:",
+            "sql": "CREATE OR REPLACE FUNCTION exec_sql(sql_text TEXT) RETURNS void AS $$ BEGIN EXECUTE sql_text; END; $$ LANGUAGE plpgsql SECURITY DEFINER;"
+        }
+    # Step 4: Write .env
+    jwt_secret = secrets.token_urlsafe(32)
+    env_updates = {
+        "SUPABASE_URL": supabase_url,
+        "SUPABASE_KEY": supabase_key,
+        "JWT_SECRET": jwt_secret,
+        "SETUP_COMPLETE": "true",
+    }
+    if service_role_key:
+        env_updates["SUPABASE_SERVICE_KEY"] = service_role_key
+    if db_url:
+        env_updates["DATABASE_URL"] = db_url
+    write_env(env_updates)
+    # Step 5: Re-initialize supabase client
+    init_supabase(supabase_url, supabase_key)
+    # Step 6: Run migrations
+    try:
+        from migrations import run_migrations
+        success = run_migrations()
+        if not success:
+            return {"success": False, "step": "migrations", "message": "Some migrations failed. Check server logs."}
+    except Exception as e:
+        return {"success": False, "step": "migrations", "message": str(e)}
+    # Step 7: Save business name
+    try:
+        _sb().table("app_settings").insert({"key": "business_name", "value": business_name}).execute()
+    except Exception:
+        try:
+            _sb().table("app_settings").update({"value": business_name}).eq("key", "business_name").execute()
+        except Exception:
+            pass
+    return {"success": True, "message": "Database configured and all migrations applied."}
+
+@api.post("/setup/verify-exec-sql")
+async def verify_exec_sql(request: Request):
+    """Called after user manually creates exec_sql. Retries the setup."""
+    if is_setup_complete():
+        raise HTTPException(status_code=403, detail="Setup already completed.")
+    body = await request.json()
+    supabase_url = body.get("supabase_url", "").strip()
+    supabase_key = body.get("supabase_key", "").strip()
+    try:
+        from supabase import create_client
+        tc = create_client(supabase_url, supabase_key)
+        tc.rpc("exec_sql", {"sql_text": "SELECT 1"}).execute()
+        return {"verified": True}
+    except Exception as e:
+        return {"verified": False, "error": str(e)[:200]}
+
+@api.post("/setup/create-admin")
+async def setup_create_admin(request: Request):
+    """Create the first admin user after database initialization."""
+    if not is_configured():
+        raise HTTPException(status_code=503, detail="Database not configured yet.")
+    # Check no admin exists already
+    admins = _sb().table("users").select("id").eq("role", "admin").limit(1).execute()
+    if admins.data:
+        raise HTTPException(status_code=400, detail="An admin user already exists. Please login.")
+    body = await request.json()
+    email = body.get("email", "").strip().lower()
+    password = body.get("password", "")
+    name = body.get("name", "Administrator")
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password are required.")
+    user_data = {
+        "email": email,
+        "password_hash": hash_password(password),
+        "name": name,
+        "role": "admin",
+        "is_active": True
+    }
+    result = _sb().table("users").insert(user_data).execute()
+    u = result.data[0]
+    # Update .env with admin credentials
+    write_env({"ADMIN_EMAIL": email, "ADMIN_PASSWORD": password})
+    # Write test credentials
+    cred_dir = Path("/app/memory")
+    cred_dir.mkdir(exist_ok=True)
+    (cred_dir / "test_credentials.md").write_text(
+        f"# Test Credentials\n\n## Admin\n- Email: {email}\n- Password: {password}\n- Role: admin\n\n"
+        f"## Auth Endpoints\n- POST /api/auth/login\n- POST /api/auth/register\n- GET /api/auth/me\n- POST /api/auth/logout\n"
+    )
+    return {"id": u["id"], "email": u["email"], "name": u["name"], "role": u["role"]}
+
 @api.get("/setup/check")
 async def check_setup():
-    tables = ["users", "suppliers", "raw_materials", "purchase_orders", "locations", "products", "inventory", "bill_of_materials", "production_orders", "customers", "sales", "expenses", "app_settings", "manual_transactions", "transaction_categories", "custom_orders", "custom_order_items", "custom_order_payments", "product_attributes", "product_variants", "product_variant_attributes", "_migrations"]
+    if not is_configured():
+        return {"all_tables_ready": False, "tables": {}, "not_configured": True}
+    tables = ["users", "suppliers", "raw_materials", "purchase_orders", "locations", "products", "inventory", "bill_of_materials", "production_orders", "customers", "sales", "expenses", "app_settings", "manual_transactions", "transaction_categories", "custom_orders", "custom_order_items", "custom_order_payments", "product_attributes", "product_variants", "product_variant_attributes", "_migrations", "shift_records", "petty_cash"]
     status = {}
     for table in tables:
         try:
-            supabase.table(table).select("id", count="exact").limit(1).execute()
+            _sb().table(table).select("id", count="exact").limit(1).execute()
             status[table] = "ok"
         except Exception as e:
             error_str = str(e)
@@ -1684,22 +1936,17 @@ async def check_setup():
                 status[table] = "missing"
             else:
                 status[table] = "error"
-            logger.info(f"Table check {table}: {error_str[:100]}")
     all_ok = all(v == "ok" for v in status.values())
     return {"all_tables_ready": all_ok, "tables": status}
-
-@api.get("/setup/migration-sql")
-async def get_migration_sql():
-    sql_path = Path(__file__).parent / "migration.sql"
-    if sql_path.exists():
-        return {"sql": sql_path.read_text()}
-    return {"sql": "Migration file not found"}
 
 # ===================== SEED ADMIN =====================
 
 @app.on_event("startup")
 async def startup():
     logger.info("Starting ERP application...")
+    if not is_setup_complete():
+        logger.info("Setup not complete. Waiting for setup wizard.")
+        return
     # Run database migrations
     try:
         from migrations import run_migrations
@@ -1710,33 +1957,26 @@ async def startup():
             logger.warning("Some migrations failed. Check logs for details.")
     except Exception as e:
         logger.warning(f"Migration runner error (non-fatal): {e}")
-    # Seed admin user
+    # Seed admin user (only if configured via env)
     try:
-        admin_email = os.environ.get("ADMIN_EMAIL", "admin@erp.com")
-        admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
-        existing = supabase.table("users").select("id, password_hash").eq("email", admin_email).execute()
-        if not existing.data:
-            supabase.table("users").insert({
-                "email": admin_email,
-                "password_hash": hash_password(admin_password),
-                "name": "Administrator",
-                "role": "admin",
-                "is_active": True
-            }).execute()
-            logger.info(f"Admin user created: {admin_email}")
-        else:
-            if not verify_password(admin_password, existing.data[0]["password_hash"]):
-                supabase.table("users").update({"password_hash": hash_password(admin_password)}).eq("id", existing.data[0]["id"]).execute()
-                logger.info("Admin password updated")
-        # Write test credentials
-        cred_dir = Path("/app/memory")
-        cred_dir.mkdir(exist_ok=True)
-        (cred_dir / "test_credentials.md").write_text(
-            f"# Test Credentials\n\n"
-            f"## Admin\n- Email: {admin_email}\n- Password: {admin_password}\n- Role: admin\n\n"
-            f"## Auth Endpoints\n- POST /api/auth/login\n- POST /api/auth/register\n- GET /api/auth/me\n- POST /api/auth/logout\n"
-        )
+        admin_email = os.environ.get("ADMIN_EMAIL")
+        admin_password = os.environ.get("ADMIN_PASSWORD")
+        if admin_email and admin_password:
+            existing = _sb().table("users").select("id, password_hash").eq("email", admin_email).execute()
+            if not existing.data:
+                _sb().table("users").insert({
+                    "email": admin_email,
+                    "password_hash": hash_password(admin_password),
+                    "name": "Administrator",
+                    "role": "admin",
+                    "is_active": True
+                }).execute()
+                logger.info(f"Admin user created: {admin_email}")
+            else:
+                if not verify_password(admin_password, existing.data[0]["password_hash"]):
+                    _sb().table("users").update({"password_hash": hash_password(admin_password)}).eq("id", existing.data[0]["id"]).execute()
+                    logger.info("Admin password updated")
     except Exception as e:
-        logger.warning(f"Startup seed failed (tables may not exist yet): {e}")
+        logger.warning(f"Startup seed failed: {e}")
 
 app.include_router(api)

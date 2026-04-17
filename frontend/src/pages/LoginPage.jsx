@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import api from "@/lib/api";
 
 export default function LoginPage() {
   const { login } = useAuth();
@@ -12,6 +13,28 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [brandName, setBrandName] = useState("");
+  const [logoUrl, setLogoUrl] = useState("");
+
+  useEffect(() => {
+    const loadBrand = async () => {
+      try {
+        const API = process.env.REACT_APP_BACKEND_URL;
+        const res = await fetch(`${API}/api/setup/status`);
+        const data = await res.json();
+        if (data.business_name) {
+          setBrandName(data.business_name);
+          document.title = data.business_name;
+        }
+      } catch {}
+      try {
+        const { data } = await api.get("/settings");
+        if (data.business_name) setBrandName(data.business_name);
+        if (data.logo_url) setLogoUrl(data.logo_url);
+      } catch {}
+    };
+    loadBrand();
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -32,18 +55,13 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen grid lg:grid-cols-2">
-      <div className="hidden lg:block relative overflow-hidden">
-        <img
-          src="https://static.prod-images.emergentagent.com/jobs/9efb1b10-3182-4939-931e-3975c608d93e/images/daae9b06d8d8cbb60aa71e5c69afa4130e34abc24462812224d1dcf7d966235e.png"
-          alt="Textile"
-          className="absolute inset-0 w-full h-full object-cover"
-        />
-        <div className="absolute inset-0 bg-navy-900/40" />
+      <div className="hidden lg:block relative overflow-hidden bg-navy-900">
+        <div className="absolute inset-0 bg-gradient-to-br from-navy-900 via-navy-800 to-navy-900" />
         <div className="relative z-10 flex flex-col justify-end h-full p-12">
           <h1 className="text-4xl sm:text-5xl font-heading font-medium text-white tracking-tight mb-3">
-            Textile ERP
+            {brandName || "ERP System"}
           </h1>
-          <p className="text-white/80 text-lg max-w-md">
+          <p className="text-white/70 text-lg max-w-md">
             End-to-end manufacturing, inventory, and retail management.
           </p>
         </div>
@@ -52,12 +70,14 @@ export default function LoginPage() {
       <div className="flex items-center justify-center p-8 bg-beige-100">
         <div className="w-full max-w-md space-y-8">
           <div className="flex items-center gap-3 mb-2">
-            <img
-              src="https://static.prod-images.emergentagent.com/jobs/9efb1b10-3182-4939-931e-3975c608d93e/images/fc3fe8419e8ec531202d0fb5cfb69d923536da9c0eca71d51c578fb78b1ad5ee.png"
-              alt="Logo"
-              className="w-10 h-10"
-            />
-            <span className="font-heading text-xl font-medium text-navy-800">TextileERP</span>
+            {logoUrl ? (
+              <img src={logoUrl} alt="Logo" className="w-10 h-10 rounded-lg object-contain" />
+            ) : (
+              <div className="w-10 h-10 rounded-lg bg-navy-800 flex items-center justify-center text-white font-heading font-bold text-lg">
+                {(brandName || "E")[0]}
+              </div>
+            )}
+            <span className="font-heading text-xl font-medium text-navy-800">{brandName || "ERP"}</span>
           </div>
 
           <div>
@@ -82,14 +102,19 @@ export default function LoginPage() {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@erp.com"
+                placeholder="you@company.com"
                 className="bg-white border-beige-300 rounded-xl px-4 py-3 text-navy-900 focus:ring-2 focus:ring-navy-500 focus:border-transparent"
                 required
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="password" className="text-navy-700 font-medium text-sm">Password</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="password" className="text-navy-700 font-medium text-sm">Password</Label>
+                <button type="button" onClick={() => navigate("/forgot-password")} className="text-xs text-navy-500 hover:text-navy-700">
+                  Forgot password?
+                </button>
+              </div>
               <Input
                 data-testid="login-password-input"
                 id="password"
@@ -111,10 +136,6 @@ export default function LoginPage() {
               {loading ? "Signing in..." : "Sign In"}
             </Button>
           </form>
-
-          <p className="text-center text-sm text-navy-500">
-            Default: admin@erp.com / admin123
-          </p>
         </div>
       </div>
     </div>

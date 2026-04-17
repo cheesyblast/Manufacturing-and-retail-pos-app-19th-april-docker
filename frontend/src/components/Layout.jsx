@@ -21,7 +21,7 @@ const navItems = [
   { path: "/settings", label: "Settings", icon: Gear, roles: ["admin"] },
 ];
 
-const DEFAULT_LOGO = "https://static.prod-images.emergentagent.com/jobs/9efb1b10-3182-4939-931e-3975c608d93e/images/fc3fe8419e8ec531202d0fb5cfb69d923536da9c0eca71d51c578fb78b1ad5ee.png";
+const DEFAULT_LOGO = "";
 
 export default function Layout({ children }) {
   const { user, logout } = useAuth();
@@ -29,14 +29,17 @@ export default function Layout({ children }) {
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [brandName, setBrandName] = useState("TextileERP");
+  const [brandName, setBrandName] = useState("ERP");
   const [logoUrl, setLogoUrl] = useState(DEFAULT_LOGO);
 
   useEffect(() => {
     const loadBrand = async () => {
       try {
         const { data } = await api.get("/settings");
-        if (data.business_name) setBrandName(data.business_name);
+        if (data.business_name) {
+          setBrandName(data.business_name);
+          document.title = data.business_name;
+        }
         if (data.logo_url) setLogoUrl(data.logo_url);
       } catch {}
     };
@@ -71,7 +74,13 @@ export default function Layout({ children }) {
         data-testid="app-sidebar"
       >
         <div className={`flex items-center gap-3 p-5 border-b border-white/10 ${collapsed ? "justify-center" : ""}`}>
-          <img src={logoUrl} alt="Logo" className="w-8 h-8 flex-shrink-0 rounded-lg object-contain" />
+          {logoUrl ? (
+            <img src={logoUrl} alt="Logo" className="w-8 h-8 flex-shrink-0 rounded-lg object-contain" />
+          ) : (
+            <div className="w-8 h-8 flex-shrink-0 rounded-lg bg-white/20 flex items-center justify-center text-white font-heading font-bold text-sm">
+              {brandName[0] || "E"}
+            </div>
+          )}
           {!collapsed && <span className="font-heading font-medium text-lg tracking-tight">{brandName}</span>}
         </div>
 

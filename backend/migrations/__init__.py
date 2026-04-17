@@ -49,8 +49,8 @@ class SupabaseRPCExecutor:
     """Execute SQL via Supabase exec_sql() RPC function."""
 
     def __init__(self):
-        from database import supabase
-        self.sb = supabase
+        from database import get_supabase
+        self.sb = get_supabase()
         # Verify exec_sql function exists
         self.sb.rpc("exec_sql", {"sql_text": "SELECT 1"}).execute()
 
@@ -120,8 +120,9 @@ def ensure_migrations_table(executor):
 def get_applied_migrations(executor):
     """Check which migrations have been applied using the Supabase REST API."""
     try:
-        from database import supabase
-        result = supabase.table("_migrations").select("version").execute()
+        from database import get_supabase
+        sb = get_supabase()
+        result = sb.table("_migrations").select("version").execute()
         return {row["version"] for row in result.data}
     except Exception:
         return set()
