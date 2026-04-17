@@ -10,7 +10,7 @@ class ERPAPITester:
     def __init__(self):
         # Get backend URL from frontend .env
         frontend_env = Path("/app/frontend/.env")
-        self.base_url = "https://quiet-luxury-pos.preview.emergentagent.com"
+        self.base_url = "https://white-label-erp.preview.emergentagent.com"
         
         if frontend_env.exists():
             with open(frontend_env) as f:

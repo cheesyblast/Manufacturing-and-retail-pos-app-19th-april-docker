@@ -1,46 +1,46 @@
-<analysis>**original_problem_statement:** Build a full-stack manufacturing and retail ERP with POS using a Supabase relational database. The system needs to support an end-to-end flow from Purchasing to Manufacturing to Inventory to Sales/POS. It requires advanced POS features (mobile registration, digital receipts, barcode, multiple payments), Multiple User Roles (Admin, Production, Cashier), an Accounting module (Revenue, COGS, Expenses, Statements), and a Quiet Luxury design aesthetic (minimalist, beige/navy).
+<analysis>**original_problem_statement:** Build a full-stack manufacturing and retail ERP with POS using a Supabase relational database. The system needs to support an end-to-end flow from Purchasing to Manufacturing to Inventory to Sales/POS. Recently updated requirements aim to turn this into a White-Label SaaS product, allowing deployment of fresh instances through a first-time Setup Wizard that dynamically configures database connections, branding, and runs automated schema migrations.
 
 **User's preferred language:** English (INSTRUCT next agent to respond in English only)
 
 **what currently exists?** 
-A functional, end-to-end full-stack ERP system with a FastAPI backend, React frontend (Tailwind/Shadcn), and Supabase PostgreSQL database. It includes core modules for POS, Inventory, Products, Manufacturing, Purchasing, Accounting, Settings, and Custom Orders. Recent updates include pagination and caching for large datasets, brand management (dynamic logos), manual transactions in accounting, print-friendly receipts, bulk CSV imports, and a custom orders module for advance payments. 
+A functional, white-labeled SaaS ERP system with a FastAPI backend, React frontend (Tailwind/Shadcn), and Supabase PostgreSQL database. It includes core modules for POS, Inventory, Manufacturing (with wastage), Purchasing (with landed costs), Accounting, and Custom Orders. It now features a Multi-Location setup, Global Tax toggles, a Recharts Dashboard for multi-unit analytics, and an automated Migration Framework running on Supabase RPC. A  wizard restricts access on fresh deployments until Supabase credentials are provided and stored dynamically in .
 
 **Last working item:**
-- Last item agent was working: Implementing the V2 feature set requested by the user, which included: UI pagination/caching, Brand Management (Logo/Name), Manual Transactions/Expense fixes, Print-friendly CSS for receipts, Bulk CSV Imports for inventory/products, and a Custom Orders module.
-- Status: COMPLETED
+- Last item agent was working: Implementing the SaaS Setup Wizard () and dynamic white-labeling. This included writing database credentials dynamically to the  file, auto-executing database migrations via Supabase RPC (), hiding all hardcoded platform references, and dynamically loading the Business Name.
+- Status: USER VERIFICATION PENDING
 - Agent Testing Done: Y
-- Which testing method agent to use?: NA (Testing is already done and passed successfully for V2 features)
+- Which testing method agent to use?: NA (Testing agent was already used to verify SaaS setup flow and dynamic branding).
 - User Testing Done: N
 
 **All Pending/In progress Issue list:**
-None. Agent successfully completed and verified all issues and features requested in the current session. 
+None.
 
 **In progress Task List:**
-None. 
+None.
 
 **Upcoming and Future Tasks:**
-- Task 1: Add Recharts-powered sales trend visualizations on the Dashboard (P1)
-- Task 2: Add a daily auto-reconciliation feature that compares POS totals vs cash drawer counts (P2)
-- Task 3: Implement a customer loyalty tier system (Bronze/Silver/Gold based on total purchases) (P2)
-- Task 4: Add sample inventory data for better POS demonstration (P2)
+- Task 1: Email (SMTP) Integration for 'Forgot Password' and 'Reset Password' flows. (Settings UI was created, but the auth flow needs the backend SMTP implementation) (P1)
+- Task 2: Implement a customer loyalty tier system (Bronze/Silver/Gold based on total purchases) (P2)
+- Task 3: Add sample inventory data for better POS demonstration (P2)
+- Task 4: Multi-currency support (P2)
+- Task 5: Export reports to PDF/Excel (P2)
 
 **Completed work in this session:**
-- Database setup and initial migration ()
-- Authentication setup and admin seeding ()
-- Full frontend UI built using Quiet Luxury design guidelines ()
-- Server-side pagination and caching for Products, Inventory, and Sales APIs (DONE)
-- Brand Management module in Settings and dynamic header/receipt logos (DONE)
-- Accounting module updates with Manual Transactions and fixed Expenses mapping (DONE)
-- Print-friendly CSS for POS thermal receipts (DONE)
-- Bulk Import feature with CSV template generation for Products and Inventory (DONE)
-- Custom Orders module tracking status and partial advance payments/unearned revenue (DONE)
-- Backend route ordering bug fixed during test agent execution (DONE)
+- Database Foundation & Locations handling across backend APIs (DONE)
+- Dynamic Product Attributes (, ) API & Settings (DONE)
+- Purchasing Landed Costs (Global Charges) & Manufacturing BOM Wastage % (DONE)
+- Tax & Compliance Global Toggle & POS Tax Calculation (DONE)
+- Recharts Dashboard with Profit Center (Location) Filters (DONE)
+- Shift Reconciliation / Shift Close screen (DONE)
+- Database Auto-Migration Framework () using Supabase RPC (DONE)
+- SaaS Setup Wizard () with  file writing (DONE)
+- Dynamic White-Label Branding (Logo, Title, Business Name) (DONE)
 
 **Earlier issues found/mentioned but not fixed:**
 None. 
 
 **Known issue recurrence from previous fork:**
-- Issue recurrence in previous fork: N/A (First tracked fork)
+- Issue recurrence in previous fork: N/A
 - Recurrence count: 0
 - Status: RESOLVED
 
@@ -48,72 +48,65 @@ None.
 
 
 **Key Technical Concepts:**
-FastAPI (Backend), React (Frontend), Tailwind CSS, Shadcn UI, Supabase PostgreSQL (Database), JWT Authentication.
+FastAPI (Backend), React (Frontend), Tailwind CSS, Shadcn UI, Supabase PostgreSQL (Database), Supabase RPC (), Recharts (Analytics), Dynamic  writing, JWT Authentication.
 
 **key DB schema:**
-- users: {id, email, password_hash, role}
-- products: {id, sku, name, unit_price, cost_price, category}
-- inventory: {id, product_id, location_id, quantity}
-- sales: {id, total, subtotal, payment_method, cashier_id}
-- expenses: {id, category, amount, type, description}
-- custom_orders: {id, customer_mobile, status, advance_payment, total_amount, unearned_revenue}
-- app_settings: {key, value}
+- : {id, name, type, address}
+-  / : {id, variant_id, attribute_id, value}
+- : {id, email, password_hash, role, location_id}
+- : {id, subtotal, tax_amount, total, location_id}
+- : {id, customer_mobile, status, advance_payment, total_amount}
+- : {key, value}
 
 **changes in tech stack:**
-None. 
+- Installed  for dashboard analytics.
 
 **All files of reference:**
-- : Houses all API routes, pagination logic, and caching logic. 
-- : Contains the latest schema additions for custom orders and manual transactions.
-- : Contains POS checkout flow and specialized receipt printing logic.
-- : Contains the updated financial sum logic and manual transaction forms.
--  & : Includes the Bulk CSV Import feature and template downloads.
-- : Newly created for managing custom tracking and advance payments.
+- : Core routing and setup wizard logic.
+- : Updated to handle missing  credentials gracefully.
+- : The custom migration framework utilizing Supabase RPC.
+- : Includes the  to enforce the SaaS wizard.
+- : The new first-time setup wizard UI.
+- : Updated with Recharts.
 
 **Areas that need refactoring:**
-None specifically; code looks healthy and tested.
+- : Currently ~2000 lines long. It houses the entire API. Breaking this down into modular routers (e.g., , , ) would greatly improve maintainability for upcoming P1/P2 features.
 
 **key api endpoints:**
-- GET  (Paginated)
-- GET  (Paginated)
-- GET  (Paginated)
-- POST 
-- POST 
-- GET 
-- GET 
-- POST 
+- : Writes  and triggers DB setup.
+- : Returns current configuration state.
+- : Recharts data formatting.
+- : Handles new tax logic.
 
 **Critical Info for New Agent:**
-- The database is hosted externally on Supabase. DO NOT modify Supabase keys or database connection methods. The  has already been run by the user.
-- Authentication relies on a custom JWT implementation that reads/writes directly to the Supabase  table via API.
-- Testing Agent v3 was used twice in the previous session and all tests passed (37/37 backend, 95% frontend).
-- A route ordering bug (e.g., specific endpoints like  needing to come before dynamic routes like ) was fixed in  by the testing agent. Be mindful of route declaration order in FastAPI if adding new endpoints.
+- The app operates as a White-Label SaaS. On a fresh environment without a configured , the API blocks access and the frontend redirects to . 
+- **DO NOT** hardcode branding references like TextileERP or Emergent.
+- The  script loads dynamically so that importing it won't crash the server if Supabase keys aren't yet populated.
+- Migrations are handled programmatically using a custom Supabase RPC function (). Ensure the Service Role key is correctly set for database mutations to succeed during setup.
 
 **documents and test reports created in this job:**
 - 
 - 
 - 
 - 
-- 
 
 **Last 10 User Messages and any pending HUMAN messages**
-1. User provided initial project details and Supabase credentials. (Completed)
-2. User confirmed design/plan and requested to proceed. (Completed)
-3. User provided Supabase DB keys and confirmed migration execution for DB initialization. (Completed)
-4. User requested the raw SQL code for the first migration. (Completed)
-5. User confirmed running the V1 migration code in Supabase. (Completed)
-6. User provided 6 major feature enhancements (Pagination, Brand Management, Manual Transactions, Print-Friendly Receipts, Bulk Imports, Custom Orders). (Completed)
-7. User confirmed running the V2 migration code in Supabase. (Completed)
+1. User confirmed the plan to implement DB Foundation, multi-unit analytics, landed costs, wastage, and tax compliance. (Completed)
+2. User requested standard migration framework via DB-agnostic approach. (Completed)
+3. User confirmed utilizing Supabase RPC for migrations when direct DB connect was unavailable. (Completed)
+4. User provided new SaaS requirement: First-Time Setup Wizard, Auto-Migration execution, Dynamic Branding/White-labeling, and SMTP Settings UI. (Completed)
+5. User confirmed using Option B (write direct to ), automating Service Role Key, and Basic SMTP. (Completed)
 *No pending human messages.*
 
 **Project Health Check:**
-Healthy.
+Healthy. Setup flow tested and verified.
 
 **3rd Party Integrations**
-- Supabase PostgreSQL (Database Backend) — requires User-provided API Keys (Already provided and configured).
+- Supabase PostgreSQL (Database Backend) — requires User API Key.
+- (Upcoming) SMTP — will require User Email/Password.
 
 **Testing status**
-- Testing agent used after significant changes: YES
+- Testing agent used after significant changes: YES (iterations 3 and 4)
 - Troubleshoot agent used after agent stuck in loop: NO
 - Test files created: , 
 - Known regressions: None
@@ -124,4 +117,7 @@ Healthy.
 *(Available in )*
 
 **What agent forgot to execute**
-The agent successfully executed all features outlined in the problem statement and the follow-up feature requests. Nothing was forgotten.</analysis>
+The user requested SMTP integration for the Forgot Password and Reset Password logic (Message 223). While the agent added the Settings UI for configuring SMTP, the actual backend flow for sending password reset emails using Python's  has not been implemented yet.
+
+**Debugging checklist for current issue**
+N/A (No active bugs, proceed with upcoming tasks).</analysis>
