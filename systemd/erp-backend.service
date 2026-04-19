@@ -1,0 +1,34 @@
+# =============================================================================
+# Systemd service for ERP Backend (FastAPI + Gunicorn)
+# =============================================================================
+# Install: sudo cp erp-backend.service /etc/systemd/system/
+# Enable:  sudo systemctl enable erp-backend
+# Start:   sudo systemctl start erp-backend
+# Logs:    sudo journalctl -u erp-backend -f
+# =============================================================================
+
+[Unit]
+Description=ERP Backend (FastAPI via Gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=erp
+Group=erp
+WorkingDirectory=/opt/erp/backend
+Environment="PATH=/opt/erp/backend/venv/bin:/usr/bin:/bin"
+EnvironmentFile=/opt/erp/backend/.env
+ExecStart=/opt/erp/backend/venv/bin/gunicorn server:app \
+  --worker-class uvicorn.workers.UvicornWorker \
+  --workers 2 \
+  --bind 127.0.0.1:8001 \
+  --timeout 120 \
+  --access-logfile /var/log/erp-backend-access.log \
+  --error-logfile /var/log/erp-backend-error.log
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

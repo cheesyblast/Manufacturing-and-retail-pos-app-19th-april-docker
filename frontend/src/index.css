@@ -114,15 +114,3 @@
     .fixed { position: static !important; background: transparent !important; }
     .rounded-2xl { border-radius: 0 !important; box-shadow: none !important; }
 }
-
-/* Hide Emergent branding for white-label */
-[class*="emergent-badge"],
-[data-emergent],
-a[href*="emergent.sh"],
-div[style*="Made with"] {
-    display: none !important;
-    visibility: hidden !important;
-    opacity: 0 !important;
-    height: 0 !important;
-    overflow: hidden !important;
-}

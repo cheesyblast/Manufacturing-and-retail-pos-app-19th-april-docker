@@ -34,7 +34,7 @@ export default function InventoryPage() {
     finally { setLoading(false); }
   };
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line
   useEffect(() => { load(); }, [selectedLocation]);
 
   const handleAddStock = async (e) => {
