@@ -62,6 +62,7 @@ Build a SaaS-ready full-stack manufacturing and retail ERP with POS using Supaba
 - **Removed dead files**: Unused SetupPage.jsx, legacy migration SQL files, orphaned test file
 - **Yarn-only**: Removed npm/eslint dev tooling, standardized on yarn
 - **Setup Wizard Bug Fix**: SETUP_COMPLETE=true now only set after admin creation (was premature). Intermediate state detection added — wizard auto-skips to step 3 if DB is ready but no admin exists. create-admin endpoint gracefully handles existing admin.
+- **Docker Deployment**: Multi-stage Dockerfile (Node 20 builds frontend, Python 3.11 runs backend), docker-compose.yml, .dockerignore. One container serves both API + frontend static files. deploy.sh and update.sh updated for Docker workflow. Nginx on host handles SSL.
 
 ## Database Tables (25+)
 users, suppliers, raw_materials, purchase_orders, purchase_order_items, locations, products, inventory, stock_transfers, stock_transfer_items, bill_of_materials, bom_items, production_orders, production_logs, customers, sales, sale_items, payments, expenses, app_settings, manual_transactions, transaction_categories, custom_orders, custom_order_items, custom_order_payments, product_attributes, product_variants, product_variant_attributes, shift_records, petty_cash, _migrations
