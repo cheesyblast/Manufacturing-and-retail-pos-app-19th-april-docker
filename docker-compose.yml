@@ -1,0 +1,16 @@
+services:
+  erp:
+    build:
+      context: .
+      args:
+        # Set to your domain/IP — baked into the frontend JS build
+        REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-http://localhost:8001}
+    container_name: erp-app
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./backend/.env
+    volumes:
+      # Persist .env across rebuilds (so setup wizard config survives)
+      - ./backend/.env:/app/.env

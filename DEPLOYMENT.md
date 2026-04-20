@@ -1,143 +1,97 @@
 # Deployment Guide
 
-Production deployment on Ubuntu 22.04 / 24.04 LTS.
+Production deployment via Docker on Ubuntu 22.04 / 24.04 LTS.
 
 ---
 
 ## Prerequisites
 
-| Component  | Version  | Notes                     |
-|------------|----------|---------------------------|
-| Ubuntu     | 22.04+   | Fresh or existing VPS     |
-| Python     | 3.11     | via deadsnakes PPA        |
-| Node.js    | 20.x     | via NodeSource             |
-| Yarn       | 1.22+    | `npm install -g yarn`     |
-| Nginx      | any      | Reverse proxy + static    |
-| Supabase   | any      | PostgreSQL backend        |
+| Component  | Version  | Notes                           |
+|------------|----------|---------------------------------|
+| Ubuntu     | 22.04+   | Fresh or existing VPS           |
+| Docker     | 24+      | Auto-installed by deploy.sh     |
+| Nginx      | any      | Reverse proxy + SSL termination |
+| Supabase   | any      | External PostgreSQL database    |
 
-## Quick Start (automated)
+## Quick Start (one command)
 
 ```bash
-git clone <your-repo-url> /tmp/erp
-cd /tmp/erp
+git clone <your-repo-url> /opt/erp
+cd /opt/erp
 chmod +x deploy.sh
 sudo ./deploy.sh your-domain.com
 ```
 
-This single command installs all system dependencies, builds the app, sets up Nginx + systemd, and optionally configures SSL via Let's Encrypt.
+This single command:
+1. Installs Docker + Nginx (if missing)
+2. Creates `.env` from template
+3. Builds the Docker image (frontend + backend)
+4. Starts the container
+5. Configures Nginx reverse proxy
+6. Sets up SSL via Let's Encrypt (if domain provided)
 
-After deployment, open `https://your-domain.com` — the Setup Wizard will guide you through database configuration.
+After deployment, open `https://your-domain.com` — the **Setup Wizard** will guide you through database configuration.
 
 ---
 
 ## Manual Deployment (step by step)
 
-### 1. System packages
+### 1. Install Docker
 
 ```bash
-sudo apt update
-sudo apt install -y software-properties-common curl git nginx build-essential libpq-dev
-
-# Python 3.11
-sudo add-apt-repository -y ppa:deadsnakes/ppa
-sudo apt install -y python3.11 python3.11-venv python3.11-dev
-
-# Node.js 20
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo bash -
-sudo apt install -y nodejs
-
-# Yarn
-sudo npm install -g yarn
+curl -fsSL https://get.docker.com | sudo sh
+sudo systemctl enable --now docker
 ```
 
-### 2. Application directory
+### 2. Clone and configure
 
 ```bash
-sudo useradd -r -m -s /bin/bash erp
-sudo mkdir -p /opt/erp
-sudo cp -r . /opt/erp/
-sudo chown -R erp:erp /opt/erp
+git clone <your-repo-url> /opt/erp
+cd /opt/erp
+cp backend/.env.example backend/.env
 ```
 
-### 3. Backend
+Edit `backend/.env` — set your JWT secret:
+```bash
+JWT_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+sed -i "s/^JWT_SECRET=.*/JWT_SECRET=${JWT_SECRET}/" backend/.env
+```
+
+> **Note:** Leave `SETUP_COMPLETE=false` and Supabase fields empty. The Setup Wizard will configure them on first boot.
+
+### 3. Build and run
 
 ```bash
-cd /opt/erp/backend
-python3.11 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-deactivate
-```
+# Set your domain/IP — this gets baked into the frontend build
+export REACT_APP_BACKEND_URL=https://your-domain.com
 
-Create the environment file:
-```bash
-cp .env.example .env
-```
-
-Edit `/opt/erp/backend/.env`:
-```env
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your-service-role-key
-DATABASE_URL=postgresql://postgres:your-password@db.your-project.supabase.co:5432/postgres
-JWT_SECRET=<generate with: python3 -c "import secrets; print(secrets.token_hex(32))">
-ADMIN_EMAIL=admin@erp.com
-ADMIN_PASSWORD=changeme
-SETUP_COMPLETE=false
-CORS_ORIGINS=*
-```
-
-> **Note:** Leave `SETUP_COMPLETE=false` for first boot. The Setup Wizard will configure the database and set this to `true` automatically.
-
-### 4. Frontend
-
-```bash
-cd /opt/erp/frontend
-cp .env.example .env
-```
-
-Edit `/opt/erp/frontend/.env`:
-```env
-REACT_APP_BACKEND_URL=https://your-domain.com
-```
-
-Build:
-```bash
-yarn install --frozen-lockfile
-yarn build
-```
-
-### 5. Systemd service
-
-```bash
-sudo cp /opt/erp/systemd/erp-backend.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable erp-backend
-sudo systemctl start erp-backend
+docker compose build
+docker compose up -d
 ```
 
 Verify:
 ```bash
-sudo systemctl status erp-backend
-curl -s http://127.0.0.1:8001/api/health
+docker compose ps
+curl http://localhost:8001/api/health
 ```
 
-### 6. Nginx
+### 4. Nginx reverse proxy
 
 ```bash
-sudo cp /opt/erp/nginx/erp.conf /etc/nginx/sites-available/erp
+sudo apt install -y nginx
+sudo cp nginx/erp.conf /etc/nginx/sites-available/erp
 sudo ln -sf /etc/nginx/sites-available/erp /etc/nginx/sites-enabled/erp
 sudo rm -f /etc/nginx/sites-enabled/default
 ```
 
-Edit `/etc/nginx/sites-available/erp` — replace `your-domain.com` with your actual domain.
+Edit `/etc/nginx/sites-available/erp` — replace `your-domain.com` with your domain.
 
 ```bash
 sudo nginx -t
 sudo systemctl restart nginx
 ```
 
-### 7. SSL (optional but recommended)
+### 5. SSL (recommended)
 
 ```bash
 sudo apt install -y certbot python3-certbot-nginx
@@ -152,61 +106,85 @@ On first boot (when `SETUP_COMPLETE=false`):
 
 1. Open the app in a browser
 2. You'll be redirected to `/setup`
-3. Enter your Supabase URL, API Key, and Service Role Key
+3. Enter your Supabase URL, API Key, and optionally Service Role Key + DB password
 4. The wizard will:
    - Validate connection
-   - Create the `exec_sql` RPC function
+   - Create the `exec_sql` RPC function (if credentials allow)
    - Run all database migrations (25+ tables)
-   - Create the admin account
-5. After completion, `SETUP_COMPLETE` is set to `true` in `.env`
-6. The app redirects to the login page
+5. Create your admin account on the next step
+6. After completion, `SETUP_COMPLETE=true` is set in `.env`
+7. The app redirects to the login page
 
-> **Important:** The setup wizard only runs once. After `SETUP_COMPLETE=true`, the `/setup` route is blocked. To re-run setup, manually set `SETUP_COMPLETE=false` in `/opt/erp/backend/.env` and restart the backend.
+> **Important:** The setup wizard only runs once. After completion, the `/setup` route redirects to login. To re-run setup, set `SETUP_COMPLETE=false` in `backend/.env` and restart: `docker compose restart`
+
+---
+
+## Architecture
+
+```
+Browser → Nginx (port 80/443) → Docker container (port 8001)
+                                   └── Gunicorn + Uvicorn
+                                        ├── /api/*    → FastAPI endpoints
+                                        └── /*        → React SPA (static files)
+```
+
+One container serves everything. Nginx handles SSL termination and proxies to the container.
+
+---
+
+## Common Commands
+
+```bash
+# View logs
+docker compose logs -f
+
+# Restart
+docker compose restart
+
+# Stop
+docker compose down
+
+# Rebuild after code changes
+docker compose up -d --build
+
+# Check status
+docker compose ps
+
+# Shell into container
+docker compose exec erp bash
+```
 
 ---
 
 ## Updating
 
-After pulling new code:
-
 ```bash
-cd /path/to/repo
+cd /opt/erp
 git pull
 sudo ./update.sh
 ```
 
 Or manually:
 ```bash
-# Sync code (preserves .env files)
-sudo rsync -a --exclude='node_modules' --exclude='.git' --exclude='__pycache__' \
-  --exclude='venv' --exclude='build' --exclude='.env' \
-  . /opt/erp/
-
-# Update backend
-cd /opt/erp/backend
-source venv/bin/activate
-pip install -r requirements.txt
-deactivate
-
-# Rebuild frontend
-cd /opt/erp/frontend
-yarn install --frozen-lockfile
-yarn build
-
-# Fix permissions + restart
-sudo chown -R erp:erp /opt/erp
-sudo systemctl restart erp-backend
+docker compose up -d --build
 sudo systemctl reload nginx
 ```
 
+Your `.env` file is mounted as a volume — it persists across rebuilds.
+
 ---
 
-## Runtime Versions
+## Changing the Domain / Backend URL
 
-This project is pinned to:
-- **Python 3.11** (see `.python-version`)
-- **Node.js 20.x** (see `.nvmrc`)
-- **Yarn 1.22+** (package manager — do not use npm)
+The frontend URL is baked into the JS build at build time. To change it:
+
+```bash
+export REACT_APP_BACKEND_URL=https://new-domain.com
+docker compose build
+docker compose up -d
+```
+
+Then update your Nginx config and SSL cert for the new domain.
 
 ---
 
@@ -215,79 +193,74 @@ This project is pinned to:
 ```
 /opt/erp/
 ├── backend/
-│   ├── .env                  ← your config (not in git)
+│   ├── .env                  ← your config (mounted into container)
 │   ├── .env.example          ← template
-│   ├── server.py             ← FastAPI application
+│   ├── server.py             ← FastAPI app (serves API + frontend)
 │   ├── auth.py               ← JWT authentication
 │   ├── database.py           ← Supabase client
 │   ├── migrations/           ← Auto-run DB migrations
-│   ├── requirements.txt      ← Python dependencies
-│   └── venv/                 ← Python virtual environment
+│   └── requirements.txt      ← Python deps
 ├── frontend/
-│   ├── .env                  ← your config (not in git)
-│   ├── .env.example          ← template
-│   ├── build/                ← production static files (served by nginx)
-│   ├── src/                  ← React source
-│   ├── package.json          ← JS dependencies
-│   └── yarn.lock             ← locked versions
+│   ├── src/                  ← React source (built during docker build)
+│   ├── package.json          ← JS deps
+│   └── yarn.lock             ← Locked versions
 ├── nginx/
-│   └── erp.conf              ← nginx config template
-├── systemd/
-│   └── erp-backend.service   ← systemd unit file
-├── deploy.sh                 ← first-time setup script
-├── update.sh                 ← code update script
-├── DEPLOYMENT.md             ← this file
-├── .nvmrc                    ← Node version pin
-└── .python-version           ← Python version pin
+│   └── erp.conf              ← Nginx config template
+├── Dockerfile                ← Multi-stage build
+├── docker-compose.yml        ← Container orchestration
+├── .dockerignore             ← Build exclusions
+├── deploy.sh                 ← One-command setup
+├── update.sh                 ← Code update script
+└── DEPLOYMENT.md             ← This file
 ```
 
 ---
 
 ## Troubleshooting
 
-### Backend won't start
+### Container won't start
 ```bash
-sudo journalctl -u erp-backend -n 50
-sudo tail -f /var/log/erp-backend-error.log
+docker compose logs --tail 50
 ```
 
 ### 502 Bad Gateway
-The backend isn't running. Check:
+Container isn't running:
 ```bash
-sudo systemctl status erp-backend
-curl http://127.0.0.1:8001/api/health
-```
-
-### Frontend shows blank page
-Ensure the build exists and nginx points to it:
-```bash
-ls /opt/erp/frontend/build/index.html
-sudo nginx -t
+docker compose ps
+docker compose up -d
+curl http://localhost:8001/api/health
 ```
 
 ### Setup wizard reappears after restart
-Check that `SETUP_COMPLETE=true` is in `/opt/erp/backend/.env` and restart:
+Check that `.env` has `SETUP_COMPLETE=true`:
 ```bash
-grep SETUP_COMPLETE /opt/erp/backend/.env
-sudo systemctl restart erp-backend
+grep SETUP_COMPLETE backend/.env
+docker compose restart
+```
+
+### Frontend shows wrong URL / API errors
+The `REACT_APP_BACKEND_URL` is baked at build time. Rebuild:
+```bash
+export REACT_APP_BACKEND_URL=https://correct-domain.com
+docker compose up -d --build
 ```
 
 ### Database migration fails
-Check backend logs for the specific SQL error. Ensure your Supabase Service Role key has DDL permissions:
+Check container logs:
 ```bash
-sudo journalctl -u erp-backend | grep -i migration
+docker compose logs | grep -i migration
 ```
 
 ---
 
-## Architecture
+## Runtime Versions
 
-```
-Browser → Nginx (port 80/443)
-             ├── /api/*  → Gunicorn (127.0.0.1:8001) → FastAPI → Supabase
-             └── /*      → /opt/erp/frontend/build/   (static React SPA)
-```
+- **Python 3.11** (in Docker image)
+- **Node.js 20** (build stage only)
+- **Yarn 1.22+** (build stage only)
 
-- **Gunicorn** runs 2 Uvicorn workers (adjust `--workers` in the systemd file for more CPU cores)
-- **Nginx** serves the frontend build as static files and reverse-proxies API requests
-- **Supabase** is the external PostgreSQL database (not hosted on this VPS)
+---
+
+## Non-Docker Deployment
+
+If you prefer running without Docker, the `systemd/erp-backend.service` file and original deploy scripts are still available. See the systemd service file for manual setup with Gunicorn.

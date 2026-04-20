@@ -1991,3 +1991,28 @@ async def startup():
         logger.warning(f"Startup seed failed: {e}")
 
 app.include_router(api)
+
+# ===================== SERVE FRONTEND (Docker production mode) =====================
+# When running in Docker, the frontend build is copied to /app/static.
+# Serve it so one container handles both API and frontend.
+import os as _os
+_static_dir = _os.path.join(_os.path.dirname(__file__), "static")
+if _os.path.isdir(_static_dir):
+    from starlette.staticfiles import StaticFiles
+    from starlette.responses import FileResponse
+
+    @app.get("/")
+    async def serve_root():
+        return FileResponse(_os.path.join(_static_dir, "index.html"))
+
+    # Serve static assets (JS/CSS bundles)
+    app.mount("/static", StaticFiles(directory=_os.path.join(_static_dir, "static")), name="frontend-static")
+
+    # SPA catch-all — any non-API route serves index.html
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        # Try to serve the exact file first (e.g. favicon, manifest)
+        file_path = _os.path.join(_static_dir, full_path)
+        if _os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(_os.path.join(_static_dir, "index.html"))

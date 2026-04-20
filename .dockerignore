@@ -1,0 +1,34 @@
+# Git
+.git
+.gitignore
+
+# Dependencies (rebuilt in container)
+frontend/node_modules
+backend/venv
+backend/__pycache__
+
+# Build artifacts
+frontend/build
+
+# Dev/test files
+test_reports
+tests
+backend/tests
+*.pyc
+.pytest_cache
+.ruff_cache
+
+# Docs (not needed in image)
+DEPLOYMENT.md
+README.md
+memory
+
+# Platform-specific
+.emergent
+design_guidelines.json
+
+# Deployment scripts (not needed inside container)
+deploy.sh
+update.sh
+nginx
+systemd
